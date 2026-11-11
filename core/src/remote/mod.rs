@@ -130,6 +130,8 @@ pub fn run(env: &Env, root: &Root, cmd: RemoteCmd) -> Result<i32> {
 
 /// Pas de Mac connu = rien n'a pu être posé pour lui : sortie 0 et un mot, jamais une erreur
 /// (la désinstallation l'appelle sans savoir si l'utilisateur a configuré un Mac un jour).
+/// En revanche, un effacement INCOMPLET (jeton non supprimable, dossier illisible) rend le code 10
+/// et un bilan : un jeton resté en place reste utilisable.
 fn cmd_forget_access(env: &Env, root: &Root, a: &ForgetAccessArgs) -> Result<i32> {
     let host = match a.host.clone().or(conf::load(root)?.host) {
         Some(h) if conf::valid_host(&h) => h,
@@ -145,11 +147,19 @@ fn cmd_forget_access(env: &Env, root: &Root, a: &ForgetAccessArgs) -> Result<i32
             return Ok(0);
         }
     };
-    let removed = conf::purge_access_tokens(&env.home, &host);
+    let bilan = conf::purge_access_tokens(&env.home, &host);
     eprintln!(
         "baluchon-core : {} jeton(s) Cloudflare Access effacé(s) de cet ordinateur.",
-        removed.len()
+        bilan.removed.len()
     );
+    if !bilan.is_complete() {
+        // Code 10 et bilan (noms seulement) : un jeton resté en place est UTILISABLE, l'appelant
+        // (amorce, désinstallation) doit le savoir au lieu de croire le ménage fait.
+        return Err(CcpError::Internal(format!(
+            "effacement INCOMPLET des jetons Cloudflare Access : ils restent utilisables sur cet ordinateur.\n{}\nSupprime-les à la main (fichiers dont le nom finit par « -token » dans ~/.cloudflared).",
+            bilan.incomplete_report()
+        )));
+    }
     Ok(0)
 }
 
@@ -211,11 +221,19 @@ fn after_connection(env: &Env, root: &Root, host: &str, forget: bool) {
     if !(forget || guest) {
         return;
     }
-    let removed = conf::purge_access_tokens(&env.home, host);
-    if !removed.is_empty() {
+    let bilan = conf::purge_access_tokens(&env.home, host);
+    if !bilan.removed.is_empty() {
         eprintln!(
             "baluchon-core : {} jeton(s) Cloudflare Access effacé(s) de cet ordinateur.",
-            removed.len()
+            bilan.removed.len()
+        );
+    }
+    if !bilan.is_complete() {
+        // Ne change pas le code de la connexion déjà finie, mais ne se tait pas : sur un poste
+        // d'invité, un jeton resté en place est un accès laissé à qui vient après.
+        eprintln!(
+            "baluchon-core : ATTENTION, effacement INCOMPLET des jetons Cloudflare Access :\n{}\nSupprime-les à la main (fichiers dont le nom finit par « -token » dans ~/.cloudflared).",
+            bilan.incomplete_report()
         );
     }
 }

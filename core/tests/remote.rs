@@ -655,6 +655,73 @@ fn forget_access_removes_only_the_hosts_access_tokens_without_connecting() {
     );
 }
 
+/// Rend `.cloudflared` impossible à modifier (ou `None` si le compte passe outre : root).
+#[cfg(unix)]
+fn lock_cloudflared(sb: &Sb) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = sb.home().join(".cloudflared");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let probe = dir.join(".sonde");
+    if std::fs::write(&probe, b"x").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        return None;
+    }
+    Some(dir)
+}
+
+#[cfg(unix)]
+fn unlock(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Revue Codex (`conf.rs`) : un effacement qui échoue rendait 0 et les amorces croyaient le ménage
+/// fait. Maintenant : code 10, un bilan par NOM, jamais le contenu d'un jeton, et les jetons sont
+/// toujours là (le bilan dit vrai).
+#[cfg(unix)]
+#[test]
+fn forget_access_that_cannot_erase_says_so_with_a_nonzero_code_and_never_prints_a_token() {
+    let sb = Sb::new();
+    let names = seed_tokens(&sb);
+    let Some(dir) = lock_cloudflared(&sb) else {
+        return; // root : l'effacement réussirait, l'épreuve ne prouverait rien
+    };
+    let o = sb.cmd().args(["remote", "forget-access"]).output().unwrap();
+    unlock(&dir);
+    let (out, err, code) = s(&o);
+    assert_eq!(code, 10, "{err}");
+    assert!(err.contains("INCOMPLET"), "{err}");
+    for n in &names {
+        assert!(err.contains(n.as_str()), "{n} absent du bilan : {err}");
+    }
+    assert!(
+        !err.contains("SECRET-DE-TEST") && !out.contains("SECRET-DE-TEST"),
+        "le contenu d'un jeton a fuité : {err}"
+    );
+    assert!(err.contains("0 jeton(s)"), "{err}");
+    // Les jetons sont toujours là, et ceux qui ne sont pas à nous aussi.
+    assert_eq!(remaining(&sb).len(), 6, "{:?}", remaining(&sb));
+}
+
+#[cfg(unix)]
+#[test]
+fn forget_access_in_an_unreadable_cloudflared_directory_is_incomplete_not_a_quiet_zero() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sb::new();
+    seed_tokens(&sb);
+    let dir = sb.home().join(".cloudflared");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&dir).is_ok() {
+        unlock(&dir);
+        return; // root
+    }
+    let o = sb.cmd().args(["remote", "forget-access"]).output().unwrap();
+    unlock(&dir);
+    let (_, err, code) = s(&o);
+    assert_eq!(code, 10, "{err}");
+    assert!(err.contains("parcouru"), "{err}");
+}
+
 #[test]
 fn forget_access_without_any_mac_is_a_quiet_success_not_an_error() {
     // La désinstallation l'appelle sans savoir si un Mac a jamais été configuré.

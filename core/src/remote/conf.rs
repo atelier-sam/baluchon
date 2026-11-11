@@ -332,24 +332,97 @@ pub fn is_access_token_name(name: &str, host: &str) -> bool {
         })
 }
 
-/// Efface les jetons Access de `<home>/.cloudflared` ; renvoie leurs noms (jamais leur contenu).
-pub fn purge_access_tokens(home: &Path, host: &str) -> Vec<String> {
+/// Bilan d'un effacement de jetons Access : ce qui est parti, ce qui est RESTÉ, et pourquoi.
+///
+/// POURQUOI un bilan et pas une simple liste de noms effacés : un jeton Access qu'on n'a pas pu
+/// effacer reste UTILISABLE sur un ordinateur qui n'est peut-être pas celui de l'utilisateur. Un
+/// effacement « au mieux » qui rend 0 laissait les amorces annoncer un ménage fait (revue Codex,
+/// `conf.rs`). Le bilan ne contient que des NOMS de fichiers et la nature d'une erreur : jamais
+/// le contenu d'un jeton.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AccessPurge {
+    /// Jetons effacés (noms triés).
+    pub removed: Vec<String>,
+    /// Jetons reconnus qu'on n'a PAS pu effacer : (nom, nature de l'erreur).
+    pub failed: Vec<(String, String)>,
+    /// Le dossier `.cloudflared` existe mais n'a pas pu être parcouru (jusqu'au bout) : on ne sait
+    /// pas ce qui y reste. Un dossier ABSENT n'est pas une erreur : il n'y a rien à effacer.
+    pub unreadable: Option<String>,
+}
+
+impl AccessPurge {
+    /// Vrai si plus aucun jeton reconnu ne reste, y compris à notre connaissance.
+    pub fn is_complete(&self) -> bool {
+        self.failed.is_empty() && self.unreadable.is_none()
+    }
+
+    /// Lignes du bilan d'un effacement INCOMPLET (noms et natures d'erreur seulement).
+    pub fn incomplete_report(&self) -> String {
+        let mut lines = Vec::new();
+        if let Some(why) = &self.unreadable {
+            lines.push(format!(
+                "~/.cloudflared n'a pas pu être parcouru entièrement ({why}) : on ne sait pas quels jetons y restent"
+            ));
+        }
+        for (name, why) in &self.failed {
+            lines.push(format!("{name} : non effacé ({why})"));
+        }
+        lines.join("\n")
+    }
+}
+
+/// Nature d'une erreur d'E/S, sans chemin ni contenu (les messages du système citent le chemin).
+fn io_kind(e: &std::io::Error) -> String {
+    format!("{:?}", e.kind())
+}
+
+/// Efface les jetons Access de `<home>/.cloudflared` et dit TOUT ce qui n'a pas pu l'être.
+pub fn purge_access_tokens(home: &Path, host: &str) -> AccessPurge {
     let dir = home.join(".cloudflared");
-    let mut removed = Vec::new();
-    let Ok(rd) = fs::read_dir(&dir) else {
-        return removed;
+    let mut bilan = AccessPurge::default();
+    let rd = match fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        // Pas de dossier : cloudflared n'a jamais rien rangé ici.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return bilan,
+        Err(e) => {
+            bilan.unreadable = Some(io_kind(&e));
+            return bilan;
+        }
     };
-    for e in rd.flatten() {
+    for entry in rd {
+        let e = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                // Une entrée illisible peut être un jeton : on ne le saura jamais, donc incomplet.
+                bilan.unreadable = Some(io_kind(&err));
+                continue;
+            }
+        };
         let name = e.file_name().to_string_lossy().into_owned();
-        if is_access_token_name(&name, host)
-            && e.path().is_file()
-            && fs::remove_file(e.path()).is_ok()
-        {
-            removed.push(name);
+        if !is_access_token_name(&name, host) {
+            continue;
+        }
+        let ft = match e.file_type() {
+            Ok(ft) => ft,
+            Err(err) => {
+                bilan.failed.push((name, io_kind(&err)));
+                continue;
+            }
+        };
+        // Un dossier au nom d'un jeton n'est pas un jeton. Un lien, lui, s'efface (jamais sa cible).
+        if !(ft.is_file() || ft.is_symlink()) {
+            continue;
+        }
+        match fs::remove_file(e.path()) {
+            Ok(()) => bilan.removed.push(name),
+            // Disparu entre-temps (cloudflared lui-même) : le résultat voulu est atteint.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => bilan.removed.push(name),
+            Err(err) => bilan.failed.push((name, io_kind(&err))),
         }
     }
-    removed.sort();
-    removed
+    bilan.removed.sort();
+    bilan.failed.sort();
+    bilan
 }
 
 #[cfg(test)]
@@ -606,10 +679,85 @@ mod tests {
             let _ = keep;
         }
         let gone = purge_access_tokens(t.path(), h);
-        assert_eq!(gone.len(), 2, "{gone:?}");
+        assert_eq!(gone.removed.len(), 2, "{gone:?}");
+        assert!(gone.is_complete(), "{gone:?}");
         assert!(cf.join("ccp-mac.token").exists() && cf.join("cert.pem").exists());
         assert!(!cf.join(format!("{h}-{AUD}-token")).exists());
-        // Dossier absent : rien, sans erreur.
-        assert!(purge_access_tokens(&t.path().join("vide"), h).is_empty());
+        // Dossier absent : rien à effacer, et ce n'est PAS une erreur.
+        let vide = purge_access_tokens(&t.path().join("vide"), h);
+        assert!(vide.removed.is_empty() && vide.is_complete(), "{vide:?}");
+    }
+
+    /// Retire le droit d'écrire dans un dossier, ou rend `None` si cela ne change rien (root).
+    #[cfg(unix)]
+    fn read_only(dir: &Path) -> Option<()> {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = dir.join(".sonde");
+        if fs::write(&probe, b"x").is_ok() {
+            let _ = fs::remove_file(&probe);
+            return None;
+        }
+        Some(())
+    }
+
+    #[cfg(unix)]
+    fn restore(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_purge_names_what_stayed_and_never_shows_a_token() {
+        let t = tempfile::tempdir().unwrap();
+        let cf = t.path().join(".cloudflared");
+        fs::create_dir_all(&cf).unwrap();
+        let h = "mac.example.com";
+        let nom = format!("{h}-{AUD}-token");
+        fs::write(cf.join(&nom), "CONTENU-SECRET-A-NE-JAMAIS-AFFICHER").unwrap();
+        if read_only(&cf).is_none() {
+            return; // exécuté en root : retirer le droit n'empêche rien, l'épreuve ne prouverait rien
+        }
+        let bilan = purge_access_tokens(t.path(), h);
+        restore(&cf);
+        assert!(!bilan.is_complete(), "{bilan:?}");
+        assert!(bilan.removed.is_empty(), "{bilan:?}");
+        assert_eq!(bilan.failed.len(), 1, "{bilan:?}");
+        assert_eq!(bilan.failed[0].0, nom);
+        let rapport = bilan.incomplete_report();
+        assert!(rapport.contains(&nom), "{rapport}");
+        assert!(!rapport.contains("SECRET"), "{rapport}");
+        // Le jeton est toujours là : le bilan dit vrai.
+        assert!(cf.join(&nom).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_directory_is_incomplete_not_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let cf = t.path().join(".cloudflared");
+        fs::create_dir_all(&cf).unwrap();
+        fs::set_permissions(&cf, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&cf).is_ok() {
+            fs::set_permissions(&cf, fs::Permissions::from_mode(0o755)).unwrap();
+            return; // root : le dossier reste lisible
+        }
+        let bilan = purge_access_tokens(t.path(), "mac.example.com");
+        fs::set_permissions(&cf, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!bilan.is_complete(), "{bilan:?}");
+        assert!(bilan.unreadable.is_some(), "{bilan:?}");
+        assert!(bilan.incomplete_report().contains("parcouru"));
+    }
+
+    #[test]
+    fn a_directory_named_like_a_token_is_not_a_token() {
+        let t = tempfile::tempdir().unwrap();
+        let cf = t.path().join(".cloudflared");
+        let h = "mac.example.com";
+        fs::create_dir_all(cf.join(format!("{h}-{AUD}-token"))).unwrap();
+        let bilan = purge_access_tokens(t.path(), h);
+        assert!(bilan.removed.is_empty() && bilan.is_complete(), "{bilan:?}");
     }
 }
