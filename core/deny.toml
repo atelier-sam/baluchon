@@ -1,0 +1,71 @@
+# cargo-deny : porte de release du noyau (scripts/release.sh la joue avant de
+# signer quoi que ce soit). Lancer à la main : `cd core && cargo deny --locked check`.
+#
+# POURQUOI cette porte : le noyau tient les jetons OAuth de Claude Code et part sur
+# des PC clients. Une dépendance transitive à licence incompatible, à faille connue,
+# tirée d'un registre ou d'un dépôt git inattendu, ou qui rouvre OpenSSL (que la
+# chaîne de compilation croisée zig cc ne sait pas lier) ne doit pas atteindre une
+# release signée.
+#
+# Pas de `[graph] targets` : on veut l'arbre de TOUTES les plateformes livrées
+# (macOS, Linux, Windows), pas seulement celle de la machine qui lance la porte.
+
+[advisories]
+version = 2
+# Une dépendance retirée de crates.io (yanked) est traitée en erreur : la release
+# se rebâtit avec Cargo.lock, un yank signale en général un défaut grave.
+yanked = "deny"
+# Aucune exception par défaut. Une exception se justifie ici, ligne par ligne,
+# avec l'identifiant RUSTSEC, la raison et la date de réexamen.
+ignore = []
+
+[licenses]
+version = 2
+# Licences permissives uniquement. Une licence absente de cette liste fait échouer
+# la porte : on l'ajoute après lecture de ses termes, jamais en silence.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+# Le crate lui-même est `publish = false` et sans licence déclarée tant que la
+# licence publique n'est pas posée (lot 3) : on l'ignore ici plutôt que d'affaiblir
+# la règle pour les dépendances.
+[licenses.private]
+ignore = true
+
+[bans]
+# Les doublons de versions (windows-sys 0.52 / 0.61, syn 2 / 3...) viennent de
+# l'amont et ne sont pas exploitables : on les voit sans bloquer.
+multiple-versions = "warn"
+wildcards = "deny"
+# `baluchon-testkit` (banc d'essai, dev-dependency par chemin) n'a pas de numéro de
+# version à épingler : un chemin ne vient d'aucun registre, il ne peut pas « flotter ».
+# Les dépendances du registre restent, elles, interdites en `*`.
+allow-wildcard-paths = true
+highlight = "all"
+# TLS = rustls + ring, jamais OpenSSL : la compilation croisée par zig cc et les PC
+# clients sans OpenSSL en dépendent. Si une dépendance le réintroduit, on veut le
+# savoir avant la release.
+deny = [
+    { crate = "openssl" },
+    { crate = "openssl-sys" },
+    { crate = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

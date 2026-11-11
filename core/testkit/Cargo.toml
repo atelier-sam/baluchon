@@ -1,0 +1,22 @@
+[package]
+name = "baluchon-testkit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "Banc d'essai partagé : faux serveur HTTP local, bac à sable HOME/racine/Trousseau jetables, magasin de login factice"
+publish = false
+
+# Pourquoi une crate à part : le banc doit servir AUSSI aux tests d'une édition étendue,
+# qui lance un AUTRE binaire (le sien) contre le même faux
+# serveur. Il ne dépend donc PAS de `baluchon_core` : le chemin du binaire à
+# lancer est un PARAMÈTRE de `Sandbox::new`, jamais une constante `env!`.
+# Aucune dépendance non plus vers de vrais secrets : tout ce qu'il fabrique est factice.
+
+[lib]
+name = "baluchon_testkit"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json = "1"
+tempfile = "3"
+tiny_http = "0.12"

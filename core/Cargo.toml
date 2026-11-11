@@ -1,0 +1,87 @@
+[package]
+name = "baluchon-core"
+# Version de la release du produit (tag `v3.0.0`) : `about --json` et `doctor` la lisent
+# ici, une seule source. `scripts/release.sh` refuse la release si le tag et cette ligne
+# divergent. Le contrat de la ligne de commande (`CONTRACT`, cli.rs) est un autre compteur.
+version = "3.0.0"
+edition = "2021"
+# File::try_lock (flock / LockFileEx) est stable depuis Rust 1.89 : on évite une
+# dépendance (fs4) pour le verrou de session.
+rust-version = "1.89"
+description = "Noyau comptes de Baluchon : statut, forfait, quota, Trousseau, lancement"
+license = "MIT"
+# WHY false : le produit se livre en binaires signés (releases), pas en crate. Publier sur
+# crates.io figerait la forme du trait `Extension` (versionné avec le contrat, TECHNICAL.md)
+# pour des tiers qui n'existent pas, et une crate publiée ne se retire jamais.
+publish = false
+
+[lib]
+name = "baluchon_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "baluchon-core"
+path = "src/main.rs"
+
+[features]
+# Expose `atomic::dir_syncs()` (compteur de fsync de répertoire) aux essais d'une crate
+# qui dépend de celle-ci. Jamais activée par un binaire livré : seulement en
+# dev-dependency d'une autre crate, pour ses essais.
+test-hooks = []
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Client HTTP bloquant : 3 à 6 requêtes par lancement, un runtime async serait
+# du poids mort. TLS rustls (provider ring : se compile avec zig cc) + racines
+# du SYSTÈME (platform-verifier) pour passer les proxys d'entreprise des PC clients.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+sha2 = "0.10"
+unicode-normalization = "0.1"
+secrecy = "0.10"
+jiff = "0.2"
+# Catalogue de logiciels (TOML embarqué + surcharge config/catalog.toml).
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
+# Archives des outils téléchargés (cloudflared .tgz, OpenSSH .zip) : en Rust pur,
+# car tar/unzip du système sont absents ou différents selon l'OS du PC client.
+flate2 = "1.1.11"
+tar = { version = "0.4.46", default-features = false }
+zip = { version = "9.5.0", default-features = false, features = ["deflate-flate2"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Même famille que la crate `windows` demandée par le brief (microsoft/windows-rs),
+# déjà dans l'arbre : liaisons brutes, sans enveloppes COM inutiles ici.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    # ACL explicite des dossiers de travail privés (privdir.rs).
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_JobObjects",
+    # SHELLEXECUTEINFOW (élévation par ShellExecuteExW) est protégée par cette
+    # fonctionnalité sur x64/arm64 : elle ne sert qu'à rendre la structure visible.
+    "Win32_System_Registry",
+    # GetSystemWindowsDirectoryW : dossiers Program Files sans passer par l'environnement.
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tiny_http = "0.12"
+tempfile = "3"
+# Banc partagé (faux serveur, bac à sable) : voir testkit/Cargo.toml.
+baluchon-testkit = { path = "testkit" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

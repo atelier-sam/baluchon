@@ -1,0 +1,324 @@
+//! Magasins d'identifiants de Claude Code, lus et réécrits SANS les abîmer.
+//!
+//! Claude range un login dans `{"claudeAiOauth":{…}, "mcpOAuth":{…}?}` : soit dans
+//! le Trousseau macOS (un item par `CLAUDE_CONFIG_DIR`), soit dans
+//! `<cfg>/.credentials.json` (Windows, Linux, et repli macOS). Un jeton longue
+//! durée (`setup-token`) vit dans `<cfg>/oauth.token`.
+//!
+//! On réécrit TOUJOURS dans le magasin d'origine, en conservant toutes les
+//! clés qu'on ne comprend pas (mcpOAuth…) : la moindre perte casse la vraie
+//! session de Claude.
+
+pub mod keychain;
+
+use crate::env::Env;
+use crate::root::ProfileDir;
+use crate::util::fingerprint;
+use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::path::Path;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreKind {
+    Keychain,
+    File,
+    Token,
+    None,
+}
+
+/// Le JSON complet d'un magasin. Pas de `Debug` dérivé : il contient des jetons.
+#[derive(Clone)]
+pub struct CredBlob {
+    value: Value,
+}
+
+impl std::fmt::Debug for CredBlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredBlob(<masqué>)")
+    }
+}
+
+impl CredBlob {
+    pub fn parse(s: &str) -> Result<CredBlob, String> {
+        match serde_json::from_str::<Value>(s) {
+            Ok(v @ Value::Object(_)) => Ok(CredBlob { value: v }),
+            Ok(_) => Err("le magasin n'est pas un objet JSON".into()),
+            Err(_) => Err("JSON invalide".into()),
+        }
+    }
+
+    pub fn to_json(&self) -> String {
+        // serde_json ne peut pas échouer sur un Value valide.
+        serde_json::to_string(&self.value).unwrap_or_default()
+    }
+
+    fn oauth(&self) -> Option<&Map<String, Value>> {
+        self.value.get("claudeAiOauth")?.as_object()
+    }
+
+    fn oauth_str(&self, key: &str) -> Option<&str> {
+        self.oauth()?.get(key)?.as_str().filter(|s| !s.is_empty())
+    }
+
+    pub fn access_token(&self) -> Option<SecretString> {
+        self.oauth_str("accessToken")
+            .map(|s| SecretString::from(s.to_string()))
+    }
+
+    pub fn refresh_token(&self) -> Option<SecretString> {
+        self.oauth_str("refreshToken")
+            .map(|s| SecretString::from(s.to_string()))
+    }
+
+    /// Y a-t-il un login exploitable (et pas seulement un `mcpOAuth` orphelin) ?
+    pub fn has_login(&self) -> bool {
+        self.oauth_str("accessToken").is_some() || self.oauth_str("refreshToken").is_some()
+    }
+
+    pub fn expires_at_ms(&self) -> Option<i64> {
+        let n = self.oauth()?.get("expiresAt")?;
+        n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))
+    }
+
+    /// Fin de vie du refresh token, écrite par les Claude récents seulement
+    /// (`refreshTokenExpiresAt`). Absente des anciens items : `None` = inconnu.
+    pub fn refresh_expires_at_ms(&self) -> Option<i64> {
+        let n = self.oauth()?.get("refreshTokenExpiresAt")?;
+        n.as_i64().or_else(|| n.as_f64().map(|f| f as i64))
+    }
+
+    pub fn scopes(&self) -> Vec<String> {
+        self.oauth()
+            .and_then(|o| o.get("scopes"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn subscription_type(&self) -> Option<String> {
+        self.oauth_str("subscriptionType").map(str::to_string)
+    }
+
+    pub fn rate_limit_tier(&self) -> Option<String> {
+        self.oauth_str("rateLimitTier").map(str::to_string)
+    }
+
+    /// Identité de la LIGNÉE de login : change quand l'utilisateur se reconnecte
+    /// ou quand le jeton tourne ; sert à invalider caches et marqueurs.
+    pub fn fingerprint(&self) -> String {
+        match self.refresh_token().or_else(|| self.access_token()) {
+            Some(t) => fingerprint(t.expose_secret()),
+            None => "none".to_string(),
+        }
+    }
+}
+
+/// Un login lu dans son magasin d'origine.
+#[derive(Clone, Debug)]
+pub struct Loaded {
+    pub kind: StoreKind,
+    pub blob: CredBlob,
+    /// Compte de l'item Trousseau (réutilisé à la réécriture).
+    pub acct: Option<String>,
+    /// Service du Trousseau (macOS), pour le diagnostic.
+    pub service: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum StoreError {
+    /// « Trousseau verrouillé »
+    Locked(String),
+    Corrupt(String),
+    Io(String),
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Locked(m) | StoreError::Corrupt(m) | StoreError::Io(m) => f.write_str(m),
+        }
+    }
+}
+
+fn read_file_store_at(path: &Path) -> Result<Option<Loaded>, StoreError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(StoreError::Io(format!(
+                "lecture de .credentials.json impossible : {e}"
+            )))
+        }
+    };
+    let blob = CredBlob::parse(&text)
+        .map_err(|m| StoreError::Corrupt(format!("identifiants illisibles ({m})")))?;
+    Ok(Some(Loaded {
+        kind: StoreKind::File,
+        blob,
+        acct: None,
+        service: None,
+    }))
+}
+
+/// Lit le login du profil : Trousseau d'abord sous macOS, puis le fichier
+/// (repli que Claude utilise lui-même quand le Trousseau est inutilisable).
+pub fn read_login(env: &Env, p: &ProfileDir) -> Result<Option<Loaded>, StoreError> {
+    read_login_at(env, &keychain::service_name(&p.cfg), &p.credentials_file())
+}
+
+/// Lecture générique d'un emplacement : `service` est le nom Trousseau EXACT
+/// (le login de la machine, `~/.claude`, n'a PAS de suffixe). Sert à `discover`,
+/// qui lit sans jamais écrire.
+pub fn read_login_at(
+    env: &Env,
+    service: &str,
+    credentials_file: &Path,
+) -> Result<Option<Loaded>, StoreError> {
+    #[cfg(target_os = "macos")]
+    if !env.no_keychain {
+        match keychain::find(env, service) {
+            Ok(Some(item)) => {
+                let blob = CredBlob::parse(&item.secret).map_err(|m| {
+                    StoreError::Corrupt(format!("item du Trousseau illisible ({m})"))
+                })?;
+                return Ok(Some(Loaded {
+                    kind: StoreKind::Keychain,
+                    blob,
+                    acct: Some(item.acct),
+                    service: Some(service.to_string()),
+                }));
+            }
+            Ok(None) => {}
+            Err(keychain::KcError::Locked(m)) => return Err(StoreError::Locked(m)),
+            Err(keychain::KcError::Failed(m)) => return Err(StoreError::Io(m)),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (env, service);
+    read_file_store_at(credentials_file)
+}
+
+/// Jeton longue durée (`oauth.token`), rogné ; vide = absent.
+pub fn read_token(p: &ProfileDir) -> Option<SecretString> {
+    let t = std::fs::read_to_string(p.token_file()).ok()?;
+    let t: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+    (!t.is_empty()).then(|| SecretString::from(t))
+}
+
+/// Forfait déclaré à la main pour un jeton longue durée (`<cfg>/plan`, une ligne).
+pub fn read_declared_plan(p: &ProfileDir) -> Option<String> {
+    let t = std::fs::read_to_string(p.plan_file()).ok()?;
+    let line = t.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(line.chars().take(40).collect())
+}
+
+/// Email local : `<cfg>/.claude.json` → `oauthAccount.emailAddress`.
+pub fn read_local_email(dir: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(".claude.json")).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.get("oauthAccount")?
+        .get("emailAddress")?
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"{"claudeAiOauth":{"accessToken":"AT1","refreshToken":"RT1","expiresAt":1762650000000,"scopes":["user:inference","user:profile"],"subscriptionType":"max","rateLimitTier":"default_claude_max_20x","extraInconnu":{"a":[1,2,3]}},"mcpOAuth":{"srv|abc":{"accessToken":"MCP","expiresAt":0}},"autreCle":42}"#;
+
+    #[test]
+    fn accessors() {
+        let b = CredBlob::parse(SAMPLE).unwrap();
+        assert!(b.has_login());
+        assert_eq!(b.expires_at_ms(), Some(1762650000000));
+        assert_eq!(b.access_token().unwrap().expose_secret(), "AT1");
+        assert_eq!(b.scopes(), ["user:inference", "user:profile"]);
+        assert_eq!(b.subscription_type().as_deref(), Some("max"));
+        assert_eq!(
+            b.rate_limit_tier().as_deref(),
+            Some("default_claude_max_20x")
+        );
+    }
+
+    #[test]
+    fn mcp_only_blob_has_no_login() {
+        let b = CredBlob::parse(r#"{"mcpOAuth":{"x":{}}}"#).unwrap();
+        assert!(!b.has_login());
+        assert_eq!(b.fingerprint(), "none");
+    }
+
+    #[test]
+    fn rejects_non_objects_and_garbage() {
+        assert!(CredBlob::parse("[]").is_err());
+        assert!(CredBlob::parse("pas du json").is_err());
+        assert!(CredBlob::parse("").is_err());
+    }
+
+    #[test]
+    fn debug_never_leaks() {
+        let b = CredBlob::parse(SAMPLE).unwrap();
+        assert!(!format!("{b:?}").contains("AT1"));
+    }
+
+    fn pdir(t: &tempfile::TempDir) -> ProfileDir {
+        use crate::root::{PathStyle, Profile, Root};
+        let r = Root::new(t.path().to_str().unwrap(), PathStyle::Unix).unwrap();
+        let p = r.profile(&Profile::parse("p").unwrap());
+        std::fs::create_dir_all(&p.dir).unwrap();
+        p
+    }
+
+    #[test]
+    fn file_store_is_read_as_a_file_login() {
+        let t = tempfile::tempdir().unwrap();
+        let p = pdir(&t);
+        std::fs::write(p.credentials_file(), SAMPLE).unwrap();
+        let env = Env::for_tests(t.path().to_path_buf());
+        // Sous macOS on interroge le Trousseau réel pour le service de ce chemin
+        // temporaire : il n'y a rien, on retombe sur le fichier.
+        let l = read_login(&env, &p).unwrap().unwrap();
+        assert_eq!(l.kind, StoreKind::File);
+        assert_eq!(l.blob.access_token().unwrap().expose_secret(), "AT1");
+        // Lecture seule : le fichier du magasin est resté à l'octet près ce qu'on y a mis.
+        assert_eq!(
+            std::fs::read_to_string(p.credentials_file()).unwrap(),
+            SAMPLE
+        );
+    }
+
+    #[test]
+    fn corrupt_file_is_an_error_not_a_panic() {
+        let t = tempfile::tempdir().unwrap();
+        let p = pdir(&t);
+        std::fs::write(p.credentials_file(), "{ cassé").unwrap();
+        let env = Env::for_tests(t.path().to_path_buf());
+        assert!(matches!(read_login(&env, &p), Err(StoreError::Corrupt(_))));
+    }
+
+    #[test]
+    fn token_and_declared_plan_and_local_email() {
+        let t = tempfile::tempdir().unwrap();
+        let p = pdir(&t);
+        assert!(read_token(&p).is_none());
+        std::fs::write(p.token_file(), "  sk-ant-oat01-abc \n").unwrap();
+        assert_eq!(read_token(&p).unwrap().expose_secret(), "sk-ant-oat01-abc");
+        std::fs::write(p.plan_file(), "\n Max x5 \nautre\n").unwrap();
+        assert_eq!(read_declared_plan(&p).as_deref(), Some("Max x5"));
+        std::fs::write(
+            p.claude_json(),
+            r#"{"oauthAccount":{"emailAddress":"a@b.fr"}}"#,
+        )
+        .unwrap();
+        assert_eq!(read_local_email(&p.dir).as_deref(), Some("a@b.fr"));
+    }
+}
