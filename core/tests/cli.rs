@@ -686,6 +686,55 @@ fn doctor_says_what_it_sees_of_the_layer_and_writes_nothing() {
     );
 }
 
+/// Générations (re-revue Codex) : `doctor` lit la couche par le pointeur `overlay/CURRENT`, pas par
+/// l'ancien manifeste à plat resté à côté, dit un pointeur illisible sans retomber sur le plat, et
+/// n'écrit rien.
+#[cfg(unix)]
+#[test]
+fn doctor_reads_the_layer_through_the_generation_pointer() {
+    let sb = Sandbox::new();
+    sb.put_file_login("1", &creds_json("AT", "RT", now_ms() + 3_600_000, 0));
+    let claude = fake_claude(
+        &sb,
+        "echo '{\"loggedIn\":true,\"email\":\"a@example.com\",\"planTier\":\"max_20x\"}'\n",
+    );
+    let doctor = |sb: &Sandbox| {
+        stdout(&sb.run(None, &["doctor", "1", "--claude", claude.to_str().unwrap()]))
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    let manifest = |name: &str| {
+        format!(
+            "name = {name}\nversion = {version}+essai.1\nbuilt_on = {version}\ncontract = 1\n\
+             platforms = darwin-*,linux-*\n"
+        )
+    };
+    let overlay = Path::new(&sb.root).join("overlay");
+    std::fs::create_dir_all(overlay.join("gen/g1")).unwrap();
+    std::fs::write(overlay.join("LAYER"), manifest("ancienne-a-plat")).unwrap();
+    std::fs::write(overlay.join("gen/g1/LAYER"), manifest("generation-un")).unwrap();
+    std::fs::write(overlay.join("CURRENT"), "gen/g1\n").unwrap();
+    let t = doctor(&sb);
+    assert!(
+        t.contains("Couche : generation-un") && !t.contains("ancienne-a-plat"),
+        "{t}"
+    );
+    // Un pointeur illisible : dit, sans repli sur la couche à plat (qui reste valide à côté).
+    std::fs::write(overlay.join("CURRENT"), "gen/../..\n").unwrap();
+    let t = doctor(&sb);
+    assert!(
+        t.contains("manifeste inutilisable") && !t.contains("ancienne-a-plat"),
+        "{t}"
+    );
+    std::fs::write(overlay.join("CURRENT"), "gen/g1\n").unwrap();
+    let before = std::fs::read_dir(&overlay).unwrap().count();
+    let _ = doctor(&sb);
+    assert_eq!(
+        std::fs::read_dir(&overlay).unwrap().count(),
+        before,
+        "doctor n'écrit rien sous overlay/"
+    );
+}
+
 /// Canari de contrat avec le VRAI Claude (aucun réseau, aucun vrai jeton) : sur un
 /// dossier de config neuf, baluchon-core et `claude auth status` doivent lire la même
 /// chose. Casse si une mise à jour de Claude change le magasin ou son nom de service.

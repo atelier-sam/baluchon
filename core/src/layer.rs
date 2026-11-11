@@ -6,9 +6,14 @@
 //! crochets `hooks/update` et `hooks/uninstall`) se pose à côté et se met à jour par ses
 //! propres crochets. Ici, on ne fait que dire ce qu'on voit (`doctor`).
 //!
-//! Manifeste `overlay/LAYER`, lignes `clé = valeur` (même syntaxe que `config/remote.conf`) :
+//! Manifeste `LAYER`, lignes `clé = valeur` (même syntaxe que `config/remote.conf`) :
 //! `name`, `version`, `built_on` (version publique de construction), `contract` (contrat CLI
 //! du noyau de la couche), `platforms` (liste séparée par des virgules, jokers `*`).
+//!
+//! Il vit dans la GÉNÉRATION courante : `overlay/gen/<nom>/LAYER`, désignée par le pointeur
+//! `overlay/CURRENT` (voir [`current_dir`]). La génération est posée en entier avant d'être
+//! visible, puis un seul renommage la désigne : un lecteur sans verrou voit l'ancienne ou la
+//! nouvelle, jamais un mélange. Sans pointeur, la couche est à plat sous `overlay/`.
 
 use crate::cli::CONTRACT;
 use crate::root::Root;
@@ -39,13 +44,73 @@ pub enum LayerState {
     Unreadable(String),
 }
 
+/// Nom du pointeur de génération, sous `<racine>/overlay/`.
+pub const POINTER: &str = "CURRENT";
+
+/// Le dossier `overlay/` (racine des générations, des crochets et du pointeur).
 pub fn dir(root: &Root) -> PathBuf {
     root.path().join("overlay")
 }
 
-/// Lit le manifeste. Ne crée, n'écrit ni ne déplace jamais rien.
+/// Dossier de la génération COURANTE de la couche : `overlay/CURRENT` contient `gen/<nom>`, le
+/// dossier est posé EN ENTIER avant que le pointeur ne le désigne (un seul renommage), donc une
+/// lecture sous ce dossier voit une génération entière. Sans pointeur, la couche est à plat sous
+/// `overlay/` (posée avant les générations). Un pointeur présent mais invalide (lien, forme
+/// inattendue, dossier absent ou lien) est une ERREUR : on ne devine jamais une autre génération.
+///
+/// Lit une seule fois le pointeur ; n'écrit ni ne crée jamais rien.
+pub fn current_dir(root: &Root) -> Result<PathBuf, String> {
+    let overlay = dir(root);
+    let pointer = overlay.join(POINTER);
+    let meta = match fs::symlink_metadata(&pointer) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(overlay),
+        Err(e) => return Err(format!("{} illisible : {e}", pointer.display())),
+    };
+    if !meta.is_file() {
+        return Err(format!(
+            "{} n'est pas un fichier ordinaire (lien ou dossier)",
+            pointer.display()
+        ));
+    }
+    let text = fs::read_to_string(&pointer)
+        .map_err(|e| format!("{} illisible : {e}", pointer.display()))?;
+    let name = parse_pointer(&text).ok_or_else(|| {
+        format!(
+            "{} : contenu inattendu (« gen/<nom> » attendu)",
+            pointer.display()
+        )
+    })?;
+    let gen = overlay.join("gen").join(name);
+    match fs::symlink_metadata(&gen) {
+        Ok(m) if m.is_dir() => Ok(gen),
+        _ => Err(format!(
+            "{} désigne {}, qui n'est pas un dossier de génération",
+            pointer.display(),
+            gen.display()
+        )),
+    }
+}
+
+/// Pure : le nom de génération que désigne le contenu de `CURRENT` (`gen/<nom>`), si la forme est
+/// stricte. Le nom ne porte ni séparateur ni `..` : le pointeur ne sort jamais de `overlay/gen/`.
+pub fn parse_pointer(text: &str) -> Option<&str> {
+    let line = text.lines().next()?.trim_end_matches('\r');
+    let name = line.strip_prefix("gen/")?;
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    let valid = first.is_ascii_alphanumeric()
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    valid.then_some(name)
+}
+
+/// Lit le manifeste de la génération courante. Ne crée, n'écrit ni ne déplace jamais rien.
 pub fn read(root: &Root) -> LayerState {
-    let p = dir(root).join(MANIFEST);
+    let base = match current_dir(root) {
+        Ok(d) => d,
+        Err(e) => return LayerState::Unreadable(e),
+    };
+    let p = base.join(MANIFEST);
     match fs::read_to_string(&p) {
         Ok(t) => classify(&t),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => LayerState::Absent,
@@ -208,5 +273,133 @@ mod tests {
         let root = Root::new(d.path().to_str().unwrap(), crate::root::PathStyle::native()).unwrap();
         assert_eq!(read(&root), LayerState::Absent);
         assert!(!d.path().join("overlay").exists());
+    }
+
+    // --- Générations : `overlay/CURRENT` désigne `overlay/gen/<nom>/` -------------------------------
+
+    fn root_of(d: &tempfile::TempDir) -> Root {
+        Root::new(d.path().to_str().unwrap(), crate::root::PathStyle::native()).unwrap()
+    }
+
+    fn write(path: &std::path::Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn pointer_forms_are_strict_and_never_leave_overlay_gen() {
+        assert_eq!(
+            parse_pointer("gen/g20261111T0459Z-1\n"),
+            Some("g20261111T0459Z-1")
+        );
+        assert_eq!(parse_pointer("gen/abc.def_1-2\r\n"), Some("abc.def_1-2"));
+        for bad in [
+            "",
+            "\n",
+            "g20261111",
+            "gen/",
+            "gen/..",
+            "gen/../x",
+            "gen/a/b",
+            "gen//etc",
+            "/etc/passwd",
+            "gen/.hidden",
+            "gen/-x",
+            "gen/a b",
+            "../gen/a",
+            "gen\\a",
+        ] {
+            assert_eq!(parse_pointer(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_pointer_wins_over_a_stale_flat_manifest() {
+        let d = tempfile::tempdir().unwrap();
+        let o = d.path().join("overlay");
+        write(
+            &o.join("LAYER"),
+            &OK.replace("extension", "ancienne-a-plat"),
+        );
+        write(&o.join("gen/g1/LAYER"), OK);
+        write(&o.join("CURRENT"), "gen/g1\n");
+        let LayerState::Usable(l) = read(&root_of(&d)) else {
+            panic!("la génération désignée doit être lue")
+        };
+        assert_eq!(l.name, "extension");
+    }
+
+    #[test]
+    fn without_a_pointer_the_flat_layout_is_still_read() {
+        let d = tempfile::tempdir().unwrap();
+        write(&d.path().join("overlay/LAYER"), OK);
+        assert!(matches!(read(&root_of(&d)), LayerState::Usable(_)));
+    }
+
+    #[test]
+    fn an_invalid_pointer_is_unreadable_never_a_guess() {
+        let d = tempfile::tempdir().unwrap();
+        let o = d.path().join("overlay");
+        // La couche à plat est valide : un pointeur illisible ne doit PAS retomber dessus.
+        write(&o.join("LAYER"), OK);
+        for bad in ["", "gen/../..", "gen/absente", "n'importe quoi", "gen/a/b"] {
+            write(&o.join("CURRENT"), bad);
+            assert!(
+                matches!(read(&root_of(&d)), LayerState::Unreadable(_)),
+                "{bad:?}"
+            );
+        }
+        // Un pointeur dont la génération n'a pas de manifeste : couche absente, pas un repli à plat.
+        fs::create_dir_all(o.join("gen/vide")).unwrap();
+        write(&o.join("CURRENT"), "gen/vide\n");
+        assert_eq!(read(&root_of(&d)), LayerState::Absent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pointer_or_generation_that_is_a_link_is_refused() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let o = d.path().join("overlay");
+        write(&d.path().join("ailleurs/LAYER"), OK);
+        write(&o.join("gen/vrai/LAYER"), OK);
+        // Le pointeur est un lien vers un vrai pointeur.
+        write(&d.path().join("p.txt"), "gen/vrai\n");
+        symlink(d.path().join("p.txt"), o.join("CURRENT")).unwrap();
+        assert!(matches!(read(&root_of(&d)), LayerState::Unreadable(_)));
+        fs::remove_file(o.join("CURRENT")).unwrap();
+        // La génération est un lien vers un dossier extérieur.
+        symlink(d.path().join("ailleurs"), o.join("gen/lien")).unwrap();
+        write(&o.join("CURRENT"), "gen/lien\n");
+        assert!(matches!(read(&root_of(&d)), LayerState::Unreadable(_)));
+    }
+
+    #[test]
+    fn reading_through_the_pointer_creates_and_writes_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let o = d.path().join("overlay");
+        write(&o.join("gen/g1/LAYER"), OK);
+        write(&o.join("CURRENT"), "gen/g1\n");
+        let avant = snapshot(&o);
+        let _ = read(&root_of(&d));
+        let _ = current_dir(&root_of(&d));
+        assert_eq!(avant, snapshot(&o));
+    }
+
+    fn snapshot(dir: &std::path::Path) -> Vec<String> {
+        fn walk(p: &std::path::Path, out: &mut Vec<String>) {
+            for e in fs::read_dir(p).unwrap() {
+                let e = e.unwrap();
+                let m = e.metadata().unwrap();
+                out.push(format!("{} {}", e.path().display(), m.len()));
+                if m.is_dir() {
+                    walk(&e.path(), out);
+                }
+            }
+        }
+        let mut v = Vec::new();
+        walk(dir, &mut v);
+        v.sort();
+        v
     }
 }

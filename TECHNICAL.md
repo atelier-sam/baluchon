@@ -8,7 +8,7 @@
 | `lib/common.sh` | Plateforme, téléchargements vérifiés (fail-closed), mises à jour, choix du noyau, purge de repli. |
 | `core/` → `baluchon-core` | Noyau Rust : comptes, statut, forfait, quotas, lancement verrouillé, outils Windows, accès distant. Contrat CLI versionné (`baluchon-core --contract`). |
 | `claude.cmd` / `claude-classic.cmd` | Lanceurs Windows (wizard / repli 100 % batch). |
-| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install`) ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique). Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
+| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install`) ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique), et tout dossier dont un ANCÊTRE peut être modifié par un autre utilisateur (écriture de groupe ou du monde sans bit sticky, propriétaire étranger). L'effacement part du dossier PARENT figé (identité périphérique:inode revérifiée, nom relatif) : un maillon échangé contre un lien après le jugement donne un refus. Un ménage incomplet (jetons Access, sessions du Trousseau, dossier non supprimé en entier) sort en code 10, 11 ou 12 avec un bilan qui nomme ce qui reste, jamais « Plus aucune trace ». Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
 | `scripts/build-core.sh` | Compile `baluchon-core` pour darwin-arm64/x64, linux-x64/arm64 (musl statique), win32-x64 (zig + cargo-zigbuild). |
 | `scripts/release.sh` | Assemble la release à plat, `SHA256SUMS` signé, contre-vérifié avec la clé embarquée. |
 | `overlay/` | Optionnel. Une couche posée à côté du portable (voir « Couches »). Le portable n'y écrit jamais. |
@@ -150,11 +150,31 @@ jour » remplacerait en silence le noyau d'une couche par le public.
 
 ```
 overlay/
-  LAYER                          manifeste (clé = valeur)
-  bin/<plateforme>/baluchon-core[.exe]   noyau complémentaire
+  CURRENT                        pointeur : « gen/<nom> », la génération courante
+  gen/<nom>/                     UNE génération de la couche, posée en entier avant d'être visible
+    LAYER                        manifeste (clé = valeur)
+    bin/<plateforme>/baluchon-core[.exe]   noyau complémentaire
+    profil/remote.conf           copie du profil posé (pour reconnaître une copie non modifiée)
   hooks/update                   appelé après chaque installation ou mise à jour du portable
   hooks/uninstall                appelé par uninstall.sh et « Tout déconnecter »
 ```
+
+**Générations** (re-revue Codex : « aucune atomicité de génération »). Une mise à jour de la
+couche ne remplace jamais un fichier de la couche en place : elle pose une NOUVELLE génération
+dans `overlay/gen/<nom>/`, invisible tant que personne ne la désigne, puis remplace `overlay/CURRENT`
+par un seul renommage (`rename(2)`, atomique). Un lecteur qui ne prend aucun verrou voit donc la
+génération précédente entière ou la nouvelle entière. Pour que cela tienne côté lecteur, le
+pointeur est lu **une seule fois** par lecture (`cc_layer_resolve` en bash, `layer::current_dir`
+en Rust) et tout le reste (manifeste, noyau) se lit sous le dossier obtenu. Pourquoi un FICHIER
+pointeur et non un lien symbolique : une clé exFAT/FAT n'a pas de liens, et Git Bash copie au lieu
+de lier (la copie n'est pas atomique). La génération précédente est gardée (un lecteur déjà parti
+peut finir de la lire, un noyau en cours d'exécution n'est pas supprimé sous ses pieds) ; les plus
+anciennes sont effacées après la bascule. Un pointeur présent mais illisible (forme inattendue,
+remontée `..`, lien, génération absente ou liée) = pas de couche et une ligne visible, JAMAIS un repli
+sur une autre génération ni sur une couche à plat. Sans `CURRENT`, la couche est à plat directement sous
+`overlay/` (posée avant les générations) : même lecture. `lib/common.sh` annonce sa capacité
+(`CCP_LAYER_POINTER=1`) : un crochet refuse de poser une génération sur un lanceur qui ne l'annonce
+pas, faute de quoi ce lanceur ne verrait que l'ancienne couche, en silence.
 
 Manifeste `LAYER` : `name`, `version` (`<version publique>+<suffixe>`), `built_on` (version
 publique de construction), `contract` (contrat CLI du noyau de la couche), `platforms` (liste
@@ -162,7 +182,7 @@ séparée par des virgules, jokers `*`).
 
 **Choix du noyau au lancement** (`cc_ensure_core`, `lib/common.sh`) :
 
-1. `overlay/LAYER` absent : noyau public.
+1. Pas de couche (ni `overlay/CURRENT`, ni `overlay/LAYER` à plat) : noyau public.
 2. Le noyau de la couche manque pour cette plateforme, n'est pas exécutable, répond un
    `--contract` différent de `CCP_CONTRACT`, ou déclare l'édition `public` : noyau public ET
    une ligne visible à chaque écran (« Couche « nom » inutilisable (raison) : noyau public

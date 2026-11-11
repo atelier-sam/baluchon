@@ -18,6 +18,10 @@ CC_RELEASES="https://downloads.claude.ai/claude-code-releases"
 CCP_REPO="atelier-sam/baluchon"
 CCP_DL="${CCP_DL:-https://github.com/$CCP_REPO/releases/latest/download}"  # surcharge = recette locale ; signature toujours exigée
 CCP_CONTRACT=1   # version du contrat CLI attendue de baluchon-core (`baluchon-core --contract`)
+# Capacité annoncée aux crochets de couche : ce lanceur sait lire une couche rangée par GÉNÉRATIONS
+# (pointeur overlay/CURRENT, voir « Couches » dans TECHNICAL.md). Un crochet refuse de poser une
+# génération sur un lanceur qui ne l'annonce pas : il ne lirait que l'ancienne couche, en silence.
+CCP_LAYER_POINTER=1
 
 # Clé publique qui signe les SHA256SUMS des releases du portable : « <identité> <type> <clé> ».
 # La clé privée n'est jamais dans le dépôt (scripts/release.sh la lit hors dépôt).
@@ -255,28 +259,72 @@ cc_download_core() {
 # ─── Couche (overlay/) ──────────────────────────────────────────────────
 # Une couche est un dossier `<racine>/overlay/` posé À CÔTÉ du portable : un manifeste
 # `LAYER` (name, version, built_on, contract, platforms), un noyau complémentaire
-# `overlay/bin/<plat>/baluchon-core[.exe]` et des crochets `overlay/hooks/{update,uninstall}`.
+# `bin/<plat>/baluchon-core[.exe]` et des crochets `overlay/hooks/{update,uninstall}`.
 # Ce fichier ne sait RIEN de son contenu et n'écrit JAMAIS sous overlay/ : installer ou mettre
 # à jour le portable n'écrit que bin/ (et les fichiers publics), puis appelle le crochet
 # `update`. WHY : sans cela, un clic sur « Mettre à jour » remplaçait en silence le noyau
 # complémentaire par le public, et un journal d'écriture laissé par lui devenait orphelin.
+#
+# GÉNÉRATIONS. Le manifeste et le noyau d'une couche vivent dans un dossier de génération
+# `overlay/gen/<nom>/` posé EN ENTIER avant d'être visible ; le fichier `overlay/CURRENT`
+# (« gen/<nom> ») le désigne, et un seul renommage le remplace. Un lecteur qui ne prend aucun
+# verrou voit donc la génération précédente entière ou la nouvelle entière, jamais un mélange à
+# condition de ne lire le pointeur QU'UNE FOIS : `cc_layer_resolve` le fait, et tout le reste
+# (manifeste, noyau) lit sous le dossier qu'elle a posé. WHY un fichier et non un lien symbolique :
+# une clé exFAT/FAT n'a pas de liens, et Git Bash copie au lieu de lier (la copie n'est pas atomique).
+# Sans `CURRENT`, la couche est à plat directement sous overlay/ (couches posées avant les
+# générations) : même lecture.
+
+# Résout UNE FOIS le dossier de la couche courante -> CC_LAYER_DIR (vide : pas de couche).
+# Un pointeur présent mais illisible (lien, forme inattendue, dossier absent) = pas de couche ET une
+# ligne visible (CC_LAYER_NOTE) : on ne devine jamais une autre génération.
+cc_layer_resolve() {
+  local o="$ROOT/overlay" p
+  CC_LAYER_DIR=""
+  if [ ! -e "$o/CURRENT" ] && [ ! -L "$o/CURRENT" ]; then
+    [ -f "$o/LAYER" ] && CC_LAYER_DIR="$o"
+    return 0
+  fi
+  p=""
+  if [ -f "$o/CURRENT" ] && [ ! -L "$o/CURRENT" ]; then
+    p="$(head -n 1 "$o/CURRENT" 2>/dev/null | tr -d '\r')"
+  fi
+  case "$p" in
+    gen/[A-Za-z0-9]*) ;;
+    *) p="" ;;
+  esac
+  case "${p#gen/}" in */*|*[!A-Za-z0-9._-]*) p="" ;; esac
+  if [ -z "$p" ] || [ ! -d "$o/$p" ] || [ -L "$o/$p" ]; then
+    CC_LAYER_NOTE="Couche inutilisable (pointeur overlay/CURRENT illisible) : noyau public utilisé. Relance l'installation pour la mettre à jour."
+    cc_log "$CC_LAYER_NOTE"
+    return 1
+  fi
+  CC_LAYER_DIR="$o/$p"
+}
 
 # Valeur d'une clé du manifeste (guillemets et fin de ligne Windows retirés), vide si absente.
+# Lit sous la génération résolue par `cc_layer_resolve` (résolue ici si personne ne l'a fait).
 cc_layer_field() {
-  sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$ROOT/overlay/LAYER" 2>/dev/null | head -1 | tr -d '\r"'
+  [ -n "${CC_LAYER_DIR:-}" ] || cc_layer_resolve || true
+  [ -n "${CC_LAYER_DIR:-}" ] || return 0
+  sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$CC_LAYER_DIR/LAYER" 2>/dev/null | head -1 | tr -d '\r"'
 }
 
 # La couche est-elle utilisable ici ? Choix du noyau (lanceur) :
-#   overlay/LAYER absent             -> noyau public
+#   pas de couche (ni CURRENT ni overlay/LAYER) -> noyau public
 #   noyau de la couche absent, non exécutable, autre contrat, ou édition « public »
 #                                    -> noyau public ET une ligne visible (CC_LAYER_NOTE)
 #   sinon                            -> noyau de la couche
 # Rend 0 et pose CC_LAYER_CORE si utilisable ; 1 sinon, avec CC_LAYER_NOTE.
+# Lit sous la génération déjà résolue (CC_LAYER_DIR) : le manifeste et le noyau d'un même appel
+# viennent TOUJOURS de la même génération.
 cc_layer_core() {
   local name raw c about why=""
   CC_LAYER_CORE=""; CC_LAYER_NOTE=""
+  [ -n "${CC_LAYER_DIR:-}" ] || cc_layer_resolve || return 1
+  [ -n "${CC_LAYER_DIR:-}" ] || return 1
   name="$(cc_layer_field name)"; [ -n "$name" ] || name="sans nom"
-  raw="$ROOT/overlay/bin/$CORE_PLAT/baluchon-core$EXE"
+  raw="$CC_LAYER_DIR/bin/$CORE_PLAT/baluchon-core$EXE"
   if [ ! -f "$raw" ]; then why="pas de noyau pour $CORE_PLAT"
   elif ! c="$(cc_runnable "$raw" "overlay-core/$CORE_PLAT")"; then why="noyau non exécutable"
   elif [ "$("$c" --contract 2>/dev/null | tr -d ' \r\n')" != "$CCP_CONTRACT" ]; then why="contrat périmé"
@@ -309,7 +357,9 @@ cc_layer_hook() {
 cc_ensure_core() {
   local raw="$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" c
   CORE=""; CC_LAYER_NOTE=""
-  if [ -f "$ROOT/overlay/LAYER" ] && cc_layer_core; then CORE="$CC_LAYER_CORE"; return 0; fi
+  # La génération est résolue ICI, une fois : le pointeur n'est plus relu pendant ce choix.
+  cc_layer_resolve || true
+  if [ -n "${CC_LAYER_DIR:-}" ] && cc_layer_core; then CORE="$CC_LAYER_CORE"; return 0; fi
   [ -f "$raw" ] || cc_download_core || { cc_log "baluchon-core indisponible (téléchargement)"; return 1; }
   c="$(cc_runnable "$raw" "core/$CORE_PLAT")" || { cc_log "baluchon-core non exécutable"; return 1; }
   if [ "$("$c" --contract 2>/dev/null | tr -d ' \r\n')" != "$CCP_CONTRACT" ]; then
