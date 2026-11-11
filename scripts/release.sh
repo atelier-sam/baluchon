@@ -111,7 +111,7 @@ else
   assets+=("Claude.command"$'\t'"$ROOT/Claude.command" "common.sh"$'\t'"$ROOT/lib/common.sh")
   assets+=("claude.cmd"$'\t'"$ROOT/claude.cmd" "claude-classic.cmd"$'\t'"$ROOT/claude-classic.cmd")
   # Les installeurs sont des actifs SIGNÉS de la release : un script qui installe Baluchon depuis
-  # ailleurs que d'une branche (l'amorce de l'atelier, par exemple) les prend ICI, vérifiés contre
+  # ailleurs que d'une branche (une amorce de déploiement, par exemple) les prend ICI, vérifiés contre
   # SHA256SUMS, au lieu d'exécuter ce que `main` contient ce jour-là (revue Codex terminale).
   assets+=("install.sh"$'\t'"$ROOT/install.sh" "install.ps1"$'\t'"$ROOT/install.ps1")
   for plat in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
