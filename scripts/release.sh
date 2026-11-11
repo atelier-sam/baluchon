@@ -18,7 +18,9 @@
 #    CCP_SIGN_KEY       clé privée de signature (défaut ~/.ssh/baluchon-release_ed25519).
 #                       Jamais dans le dépôt, jamais affichée.
 #    CCP_SIGNER_ID      identité du signataire (défaut baluchon-release)
-#    CCP_SIGNER_SRC     fichier qui embarque la clé publique, ligne CCP_SIGNER='<id> <type> <clé>'
+#    CCP_SIGNER_SRC     fichier qui embarque la clé publique : UNE seule ligne
+#                       CCP_SIGNER='<id> ssh-ed25519 <clé>' au format strict (aucune option, aucun
+#                       autre champ ; sinon refus). Cette clé doit être celle DÉRIVÉE de CCP_SIGN_KEY.
 #                       (défaut lib/common.sh ; relatif à la racine, ou absolu)
 #    CCP_SIGNER_COPIES  autres fichiers qui doivent porter la MÊME clé publique, séparés par des
 #                       espaces (défaut « install.sh install.ps1 » ; vide = aucun)
@@ -65,15 +67,52 @@ tag="${CCP_TAG:-$(git -C "$ROOT" describe --exact-match --tags HEAD 2>/dev/null 
 [ -n "$tag" ] || die "aucun tag sur HEAD : une release se fait sur un commit taggé v$version (ou CCP_TAG=v$version pour une répétition)"
 [ "$tag" = "v$version" ] || die "le tag « $tag » et core/Cargo.toml (version $version) divergent : corrige l'un des deux"
 
+# La ligne du signataire d'un fichier : UNE seule ligne CCP_SIGNER=, au format STRICT
+#   CCP_SIGNER='<identité> ssh-ed25519 <clé en base64>'
+# (identité en [A-Za-z0-9._-], aucune option comme namespaces="…", aucun autre champ). Écrit
+# « <identité> ssh-ed25519 <clé> » ; échoue sinon. Revue Codex, 2e passe : une ligne valide pour
+# allowed_signers mais mal rangée (`autre namespaces="file" ssh-ed25519 <clé>`) faisait lire autre
+# chose que la clé au 3e champ, et la garde lecture seule était sautée. Ce qui n'est pas strict est
+# REFUSÉ, jamais interprété ; et la garde ne se fie de toute façon plus à cette ligne (voir plus bas).
+ligne_signataire() { # ligne_signataire <fichier>
+  local n l re
+  re="^CCP_SIGNER='([A-Za-z0-9._-]+) ssh-ed25519 ([A-Za-z0-9+/]+={0,2})'\$"
+  n="$(grep -cE '(^|[^A-Za-z0-9_])CCP_SIGNER=' "$1" || true)"
+  [ "$n" = 1 ] || return 1
+  l="$(grep -E '(^|[^A-Za-z0-9_])CCP_SIGNER=' "$1")"
+  [[ "$l" =~ $re ]] || return 1
+  printf '%s ssh-ed25519 %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
 case "$SIGNER_SRC" in /*) SIGNER_FILE="$SIGNER_SRC" ;; *) SIGNER_FILE="$ROOT/$SIGNER_SRC" ;; esac
 [ -f "$SIGNER_FILE" ] || die "fichier de la clé publique absent : $SIGNER_FILE"
-signer="$(sed -n "s/^CCP_SIGNER='\(.*\)'$/\1/p" "$SIGNER_FILE")"
-[ -n "$signer" ] || die "CCP_SIGNER introuvable dans $SIGNER_SRC"
+signer="$(ligne_signataire "$SIGNER_FILE")" \
+  || die "$SIGNER_SRC doit porter UNE SEULE ligne CCP_SIGNER='<identité> ssh-ed25519 <clé>' au format strict (aucune option, aucun autre champ, rien d'autre qui contienne « CCP_SIGNER= »)"
 [ "${signer%% *}" = "$SIGNER_ID" ] || die "l'identité de $SIGNER_SRC (${signer%% *}) n'est pas $SIGNER_ID"
+cle_signataire="${signer##* }"
 # Les copies de la clé publique doivent être identiques.
 for f in $SIGNER_COPIES; do
   grep -qF "${signer#"$SIGNER_ID" }" "$ROOT/$f" || die "clé publique de $f différente de $SIGNER_SRC"
 done
+
+# La clé RÉELLEMENT utilisée pour signer : sa partie publique est DÉRIVÉE de la clé privée passée à
+# ssh-keygen (`-y` n'écrit que la partie publique), pas lue dans un fichier qui pourrait mentir.
+# Deux conséquences, toutes deux jugées avant le moindre travail :
+#   - elle doit être celle que la ligne embarquée annonce, sinon les clients ne pourraient pas
+#     vérifier ce qu'on signe (et, avant ce contrôle, la signature était produite puis la sortie
+#     laissée sur le disque quand la contre-vérification échouait) ;
+#   - elle sert à décider de la garde lecture seule (plus bas), quelle que soit l'identité ou la
+#     façon dont la ligne est écrite.
+PUBLIC_ID="baluchon-release"
+cle_utilisee="$(ssh-keygen -y -f "$KEY" | awk 'NR == 1 && $1 == "ssh-ed25519" { print $2 }')" || cle_utilisee=""
+[ -n "$cle_utilisee" ] || die "impossible de dériver une clé publique ed25519 de la clé de signature : $KEY (clé protégée, illisible, ou d'un autre type)"
+[ "$cle_utilisee" = "$cle_signataire" ] \
+  || die "la clé de signature ne correspond pas à la clé publique embarquée dans $SIGNER_SRC : les clients ne pourraient pas vérifier la release"
+# La clé publique du PRODUIT : celle de lib/common.sh, que tout client public vérifie.
+[ -f "$ROOT/lib/common.sh" ] || die "lib/common.sh absent : la garde lecture seule ne saurait pas quelle clé est publique"
+produit="$(ligne_signataire "$ROOT/lib/common.sh")" \
+  || die "lib/common.sh doit porter UNE SEULE ligne CCP_SIGNER='<identité> ssh-ed25519 <clé>' au format strict"
+cle_produit="${produit##* }"
 
 # Porte P5 : licences, avis de sécurité RUSTSEC, sources et crates interdits
 # (deny.toml de chaque crate). Avant tout `rm`/signature : une release refusée ne laisse rien
@@ -129,15 +168,13 @@ fi
 # Imposée selon l'IDENTITÉ de ce qui est publié, JAMAIS selon la façon dont la liste d'actifs est
 # choisie : avec `CCP_ASSETS`, la garde passait autrefois pour toujours, et une liste personnalisée
 # pouvait faire signer un noyau privé comme release publique (revue Codex terminale). Elle
-# s'applique donc si la release porte l'identité publique OU la CLÉ publique du produit (celle de
-# lib/common.sh : tout client public la vérifie, quel que soit le nom qu'on lui donne ici). Une
-# édition privée, qui signe avec SA clé sous SA propre identité, n'est pas concernée.
-PUBLIC_ID="baluchon-release"
-cle_produit="$(sed -n "s/^CCP_SIGNER='[^ ]* [^ ]* \([^ ']*\)'$/\1/p" "$ROOT/lib/common.sh" 2>/dev/null | head -1)"
-cle_signature="$(printf '%s\n' "$signer" | awk '{print $3}')"
+# s'applique donc si la release porte l'identité publique OU si la clé qui SIGNE est celle du
+# produit (dérivée de la clé privée réellement passée à ssh-keygen, voir plus haut : ni l'identité
+# annoncée ni le format de la ligne ne peuvent plus la contourner). Une édition privée, qui signe
+# avec SA clé sous SA propre identité, n'est pas concernée.
 publique=0
 [ "$SIGNER_ID" = "$PUBLIC_ID" ] && publique=1
-[ -n "$cle_produit" ] && [ "$cle_signature" = "$cle_produit" ] && publique=1
+[ "$cle_utilisee" = "$cle_produit" ] && publique=1
 if [ "$publique" = 1 ]; then
   juges=()
   for a in "${assets[@]}"; do juges+=("${a#*$'\t'}"); done

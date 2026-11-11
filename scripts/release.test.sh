@@ -213,6 +213,103 @@ printf '%s\n' "$ECRIT" > "$T/dist/linux-x64/baluchon-core"
 expect "liste par défaut dont un binaire sait écrire" 1 rel "$T" CCP_SIGNER_ID=baluchon-release CCP_ASSETS=
 dit "…la garde lecture seule la refuse" "la garde lecture seule refuse la release"
 
+echo "== 5. la garde suit la clé RÉELLEMENT utilisée, la ligne du signataire est stricte (re-revue Codex) =="
+# Re-revue Codex : `CCP_SIGNER='autre namespaces="file" ssh-ed25519 <clé du produit>'` est valide pour
+# allowed_signers mais son 3e champ vaut « ssh-ed25519 » : la garde, qui lisait ce champ, était sautée,
+# et la signature restait acceptée par les clients publics (le principal n'est pas lié à la signature).
+# Chaque attaque est d'abord rejouée contre l'ANCIEN release.sh (commit 9975006, lu dans l'historique
+# git) : elle doit RÉUSSIR là. Sans historique (archive exportée), ces contrôles sont sautés et dits tels.
+ANCIEN="$BASE/release-ancien.sh"
+if git -C "$HERE" show 9975006:scripts/release.sh > "$ANCIEN" 2>/dev/null && [ -s "$ANCIEN" ]; then
+  A_ANCIEN=1
+else
+  A_ANCIEN=0; rm -f "$ANCIEN"
+  echo "(!) historique git absent : les contrôles positifs sur l'ancien release.sh (9975006) sont sautés"
+fi
+produit_arbre() { # produit_arbre <nom> [ancien] : lib/common.sh = clé du produit ; a.txt sait écrire un identifiant
+  arbre "$1"
+  [ "${2:-}" != ancien ] || cp "$ANCIEN" "$T/scripts/release.sh"
+  printf "CCP_SIGNER='baluchon-release %s'\n" "$PUB" > "$T/lib/common.sh"
+  printf '%s\n' "$ECRIT" > "$T/a.txt"
+}
+verifie_comme_un_client() { # la signature de $1/sortie passe-t-elle chez un client PUBLIC (identité baluchon-release) ?
+  printf 'baluchon-release %s\n' "$PUB" > "$KEYS/allowed-public"
+  ssh-keygen -Y verify -f "$KEYS/allowed-public" -I baluchon-release -n file -s "$1/sortie/SHA256SUMS.sig" < "$1/sortie/SHA256SUMS" >/dev/null 2>&1
+}
+# 5a. Le scénario exact de Codex.
+codex_autre() { # lance le scénario sur l'arbre courant
+  printf "CCP_SIGNER='autre namespaces=\"file\" %s'\n" "$PUB" > "$T/lib/autre.sh"
+  rel "$T" CCP_SIGNER_ID=autre CCP_SIGNER_SRC=lib/autre.sh CCP_SIGNER_COPIES= CCP_SIGN_KEY="$KEYS/essai"
+}
+if [ "$A_ANCIEN" = 1 ]; then
+  produit_arbre codex-ancien ancien
+  run codex_autre
+  if [ "$LAST_RC" -eq 0 ] && grep -q ' a\.txt$' "$T/sortie/SHA256SUMS" && verifie_comme_un_client "$T"; then
+    verdict vrai "CONTRÔLE POSITIF : l'ANCIEN release.sh signe l'actif qui écrit un identifiant, et un client public accepte la signature"
+  else
+    verdict faux "CONTRÔLE POSITIF : l'ancien release.sh aurait dû laisser passer le scénario de Codex" "code $LAST_RC : $LAST_OUT"
+  fi
+fi
+produit_arbre codex-nouveau
+expect "ligne « autre namespaces=… » (scénario de Codex, copies désactivées, clé du produit)" 1 codex_autre
+dit "…refusée pour son format" "format strict"
+[ ! -e "$T/sortie" ] && verdict vrai "…et rien n'a été produit ni signé" || verdict faux "…et rien n'a été produit ni signé" "$(ls -A "$T/sortie" 2>&1)"
+# 5b. Format strict, mais la clé embarquée n'est pas celle qui signe : avant, la signature (de la clé du
+# produit, sur un actif qui écrit) était produite, la contre-vérification échouait APRÈS, et la sortie
+# signée restait sur le disque, valide pour tout client public.
+embarque_autre() {
+  printf "CCP_SIGNER='prive-release %s'\n" "$PUB2" > "$T/lib/autre.sh"
+  rel "$T" CCP_SIGNER_ID=prive-release CCP_SIGNER_SRC=lib/autre.sh CCP_SIGNER_COPIES= CCP_SIGN_KEY="$KEYS/essai"
+}
+if [ "$A_ANCIEN" = 1 ]; then
+  produit_arbre embarque-ancien ancien
+  run embarque_autre
+  if [ "$LAST_RC" -ne 0 ] && [ -f "$T/sortie/SHA256SUMS.sig" ] && verifie_comme_un_client "$T"; then
+    verdict vrai "CONTRÔLE POSITIF : l'ANCIEN release.sh échoue mais LAISSE une sortie signée de la clé du produit, valide pour un client public"
+  else
+    verdict faux "CONTRÔLE POSITIF : l'ancien release.sh aurait dû laisser une sortie signée" "code $LAST_RC : $LAST_OUT"
+  fi
+fi
+produit_arbre embarque-nouveau
+expect "clé embarquée ≠ clé qui signe (clé du produit, sous l'identité d'une édition privée)" 1 embarque_autre
+dit "…refusée avant tout travail" "ne correspond pas à la clé publique embarquée"
+[ ! -e "$T/sortie" ] && verdict vrai "…et aucune sortie signée ne reste" || verdict faux "…et aucune sortie signée ne reste" "$(ls -A "$T/sortie" 2>&1)"
+# 5c. La garde se décide sur la clé dérivée, quelle que soit l'identité : la clé du produit sous une
+# autre identité, ligne stricte (le cas de la section 4 passe maintenant par la clé dérivée).
+produit_arbre derivee-nouveau
+printf "CCP_SIGNER='autre-release %s'\n" "$PUB" > "$T/lib/autre.sh"
+expect "clé du produit (dérivée de la clé privée) sous une autre identité + actif qui écrit" 1 \
+  rel "$T" CCP_SIGNER_ID=autre-release CCP_SIGNER_SRC=lib/autre.sh CCP_SIGNER_COPIES= CCP_SIGN_KEY="$KEYS/essai"
+dit "…la garde lecture seule la refuse" "la garde lecture seule refuse la release"
+# 5d. Une seule ligne CCP_SIGNER= par fichier, au format strict, aussi dans la référence du produit.
+produit_arbre deux-lignes
+printf "CCP_SIGNER='autre-release %s'\nCCP_SIGNER='autre-release %s'\n" "$PUB" "$PUB" > "$T/lib/autre.sh"
+expect "deux lignes CCP_SIGNER= dans le fichier du signataire" 1 \
+  rel "$T" CCP_SIGNER_ID=autre-release CCP_SIGNER_SRC=lib/autre.sh CCP_SIGNER_COPIES= CCP_SIGN_KEY="$KEYS/essai"
+dit "…refusées" "UNE SEULE ligne"
+produit_arbre ligne-indentee
+printf "  CCP_SIGNER='autre-release %s'\n" "$PUB" > "$T/lib/autre.sh"
+expect "ligne CCP_SIGNER= indentée (pas au format strict)" 1 \
+  rel "$T" CCP_SIGNER_ID=autre-release CCP_SIGNER_SRC=lib/autre.sh CCP_SIGNER_COPIES= CCP_SIGN_KEY="$KEYS/essai"
+produit_arbre produit-illisible
+printf "# plus de ligne ici\n" > "$T/lib/common.sh"
+printf "CCP_SIGNER='prive-release %s'\n" "$PUB2" > "$T/lib/prive.sh"
+expect "la référence du produit (lib/common.sh) n'a pas sa ligne : refus (on ne saurait pas quelle clé est publique)" 1 \
+  rel "$T" CCP_SIGN_KEY="$KEYS/prive" CCP_SIGNER_ID=prive-release CCP_SIGNER_SRC=lib/prive.sh CCP_SIGNER_COPIES=
+dit "…et il le dit" "lib/common.sh doit porter"
+# 5e. Une clé de signature qui n'en est pas une, ou qui n'est pas celle de la ligne.
+produit_arbre cle-invalide
+printf 'pas une clé\n' > "$KEYS/faux"; chmod 600 "$KEYS/faux"
+expect "CCP_SIGN_KEY n'est pas une clé privée" 1 rel "$T" CCP_SIGN_KEY="$KEYS/faux" CCP_SIGNER_ID=baluchon-release
+dit "…et il le dit" "impossible de dériver"
+[ ! -e "$T/sortie" ] && verdict vrai "…et rien n'a été produit" || verdict faux "…et rien n'a été produit"
+# 5f. Le chemin légitime reste ouvert : l'édition privée (sa clé, sa ligne stricte) n'est pas gênée.
+pub_arbre edition-privee-2
+printf "CCP_SIGNER='prive-release %s'\n" "$PUB2" > "$T/lib/prive.sh"
+printf '%s\n' "$ECRIT" > "$T/a.txt"
+expect "édition privée (clé dérivée ≠ clé du produit) : release produite, la garde du public ne s'applique pas" 0 \
+  rel "$T" CCP_SIGN_KEY="$KEYS/prive" CCP_SIGNER_ID=prive-release CCP_SIGNER_SRC=lib/prive.sh CCP_SIGNER_COPIES=
+
 echo
 printf '%d ok, %d ko\n' "$OK" "$KO"
 [ "$KO" -eq 0 ]
