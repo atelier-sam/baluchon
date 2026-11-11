@@ -23,8 +23,9 @@
 #    CCP_SIGNER_COPIES  autres fichiers qui doivent porter la MÊME clé publique, séparés par des
 #                       espaces (défaut « install.sh install.ps1 » ; vide = aucun)
 #    CCP_ASSETS         fichier « nom publié <TAB> source » (source relative à la racine ou
-#                       absolue) qui REMPLACE la liste d'actifs publique. Sans lui, la liste est
-#                       celle du produit et la garde lecture seule juge ses cinq binaires.
+#                       absolue) qui REMPLACE la liste d'actifs publique. Elle ne change RIEN à la
+#                       garde lecture seule : celle-ci est imposée selon la clé et l'identité de
+#                       publication, jamais selon la façon dont la liste est choisie (voir plus bas).
 #    CCP_OUT            dossier de sortie (défaut dist/release) ; recréé à chaque exécution
 #    CCP_DENY_DIRS      crates passées à `cargo deny` (défaut « core ») : chacune a son Cargo.lock.
 #                       Vide = aucune (épreuves de ce script seulement)
@@ -109,18 +110,38 @@ if [ -n "${CCP_ASSETS:-}" ]; then
 else
   assets+=("Claude.command"$'\t'"$ROOT/Claude.command" "common.sh"$'\t'"$ROOT/lib/common.sh")
   assets+=("claude.cmd"$'\t'"$ROOT/claude.cmd" "claude-classic.cmd"$'\t'"$ROOT/claude-classic.cmd")
-  binaires=()
+  # Les installeurs sont des actifs SIGNÉS de la release : un script qui installe Baluchon depuis
+  # ailleurs que d'une branche (l'amorce de l'atelier, par exemple) les prend ICI, vérifiés contre
+  # SHA256SUMS, au lieu d'exécuter ce que `main` contient ce jour-là (revue Codex terminale).
+  assets+=("install.sh"$'\t'"$ROOT/install.sh" "install.ps1"$'\t'"$ROOT/install.ps1")
   for plat in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
     exe=""; [ "$plat" = win32-x64 ] && exe=.exe
     src="$ROOT/dist/$plat/baluchon-core$exe"
     [ -f "$src" ] || die "binaire manquant : $src (lancer scripts/build-core.sh)"
-    binaires+=("$src")
     assets+=("baluchon-core-$plat$exe"$'\t'"$src")
   done
-  # Porte P6 : le noyau public ne sait pas ÉCRIRE un identifiant. Motifs de renouvellement
-  # et d'écriture refusés dans core/src ET dans les cinq binaires à livrer (strings). Fermée
-  # par défaut, sans variable de contournement ; ses épreuves : scripts/garde-lecture-seule.test.sh.
-  "$ROOT/scripts/garde-lecture-seule.sh" "${binaires[@]}" \
+fi
+
+# Porte P6 : le noyau PUBLIC ne sait pas ÉCRIRE un identifiant. Motifs de renouvellement et
+# d'écriture refusés dans core/src ET dans CHAQUE actif à livrer (strings). Fermée, sans variable
+# de contournement ; ses épreuves : scripts/garde-lecture-seule.test.sh et release.test.sh.
+#
+# Imposée selon l'IDENTITÉ de ce qui est publié, JAMAIS selon la façon dont la liste d'actifs est
+# choisie : avec `CCP_ASSETS`, la garde passait autrefois pour toujours, et une liste personnalisée
+# pouvait faire signer un noyau privé comme release publique (revue Codex terminale). Elle
+# s'applique donc si la release porte l'identité publique OU la CLÉ publique du produit (celle de
+# lib/common.sh : tout client public la vérifie, quel que soit le nom qu'on lui donne ici). Une
+# édition privée, qui signe avec SA clé sous SA propre identité, n'est pas concernée.
+PUBLIC_ID="baluchon-release"
+cle_produit="$(sed -n "s/^CCP_SIGNER='[^ ]* [^ ]* \([^ ']*\)'$/\1/p" "$ROOT/lib/common.sh" 2>/dev/null | head -1)"
+cle_signature="$(printf '%s\n' "$signer" | awk '{print $3}')"
+publique=0
+[ "$SIGNER_ID" = "$PUBLIC_ID" ] && publique=1
+[ -n "$cle_produit" ] && [ "$cle_signature" = "$cle_produit" ] && publique=1
+if [ "$publique" = 1 ]; then
+  juges=()
+  for a in "${assets[@]}"; do juges+=("${a#*$'\t'}"); done
+  "$ROOT/scripts/garde-lecture-seule.sh" "${juges[@]}" \
     || die "la garde lecture seule refuse la release (le public ne doit pas savoir écrire un identifiant) : voir ci-dessus"
 fi
 

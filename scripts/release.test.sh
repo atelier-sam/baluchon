@@ -28,7 +28,9 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELEASE="$HERE/release.sh"
+GARDE="$HERE/garde-lecture-seule.sh"
 [ -f "$RELEASE" ] || { echo "release.sh introuvable" >&2; exit 2; }
+[ -f "$GARDE" ] || { echo "garde-lecture-seule.sh introuvable" >&2; exit 2; }
 command -v ssh-keygen >/dev/null 2>&1 || { echo "ssh-keygen est requis" >&2; exit 2; }
 
 BASE_IN="${1:-}"
@@ -79,6 +81,11 @@ arbre() {
   printf 'x\n' > "$T/install.ps1"; printf "%s\n" "$PUB" >> "$T/install.ps1"
   printf 'un\n' > "$T/a.txt"; printf 'deux\n' > "$T/b.txt"
   printf 'a.txt\ta.txt\nb.txt\tb.txt\n' > "$T/assets.tsv"
+  # La garde lecture seule s'applique dès que la release porte la clé (ou l'identité) PUBLIQUE du
+  # produit, ce qui est le cas de toutes ces releases d'essai : elle a besoin de ses sources.
+  cp "$GARDE" "$T/scripts/garde-lecture-seule.sh"
+  mkdir -p "$T/core/src"
+  printf 'fn main() {}\n' > "$T/core/src/x.rs"
 }
 # Environnement commun d'une release d'essai.
 rel() { # rel <arbre> [VAR=valeur]... : lance release.sh de l'arbre
@@ -154,6 +161,57 @@ expect "…et refuse un SHA256SUMS dont un octet a changé" 255 \
   bash -c 'ssh-keygen -Y verify -f "$1" -I essai-release -n file -s "$2" < "$3"' _ "$KEYS/allowed" "$S/SHA256SUMS.sig" "$KEYS/alteree"
 expect "les sommes correspondent aux fichiers" 0 bash -c 'cd "$1" && shasum -a 256 -c SHA256SUMS' _ "$S"
 expect "une seconde release remplace la première (sortie de release reconnue)" 0 rel "$T"
+
+echo "== 4. la garde lecture seule suit l'IDENTITÉ de publication, pas le choix des actifs =="
+# Revue Codex terminale : avec CCP_ASSETS, la garde passait toujours, et une liste personnalisée
+# pouvait faire signer un noyau écrivant des identifiants comme une release PUBLIQUE.
+ECRIT='grant_type=refresh_token'   # un motif que la garde refuse dans un actif
+pub_arbre() { # pub_arbre <nom> : un arbre dont la bibliothèque porte l'identité PUBLIQUE
+  arbre "$1"
+  printf "CCP_SIGNER='baluchon-release %s'\n" "$PUB" > "$T/lib/common.sh"
+}
+pub_arbre pub-propre
+expect "identité publique + liste personnalisée propre" 0 rel "$T" CCP_SIGNER_ID=baluchon-release
+pub_arbre pub-contamine
+printf '%s\n' "$ECRIT" > "$T/a.txt"
+expect "identité publique + liste personnalisée dont un actif sait écrire un identifiant" 1 rel "$T" CCP_SIGNER_ID=baluchon-release
+dit "…la garde lecture seule la refuse" "la garde lecture seule refuse la release"
+[ ! -e "$T/sortie" ] && verdict vrai "…et rien n'a été produit ni signé" || verdict faux "…et rien n'a été produit ni signé"
+# Le même actif, signé avec la CLÉ du produit sous un AUTRE nom : la clé publique du produit
+# vérifie ce que tout client public vérifie, quel que soit le nom qu'on lui donne ici.
+arbre cle-publique-autre-nom
+printf "CCP_SIGNER='autre-release %s'\n" "$PUB" > "$T/lib/autre.sh"
+printf '%s\n' "$ECRIT" > "$T/a.txt"
+expect "clé publique du produit sous une autre identité + actif qui écrit" 1 rel "$T" CCP_SIGNER_ID=autre-release CCP_SIGNER_SRC=lib/autre.sh
+dit "…la garde lecture seule la refuse aussi" "la garde lecture seule refuse la release"
+# Une édition privée : sa propre clé, sa propre identité, son propre fichier de clé publique. La
+# garde du public ne la concerne pas (son noyau écrit des identifiants, c'est sa raison d'être).
+ssh-keygen -q -t ed25519 -N "" -C prive -f "$KEYS/prive" >/dev/null || { echo "ssh-keygen a échoué" >&2; exit 2; }
+PUB2="$(cut -d' ' -f1,2 "$KEYS/prive.pub")"
+pub_arbre edition-privee
+printf "CCP_SIGNER='prive-release %s'\n" "$PUB2" > "$T/lib/prive.sh"
+printf '%s\n' "$ECRIT" > "$T/a.txt"
+expect "édition privée (sa clé, son identité) : la garde du public ne s'applique pas" 0 \
+  rel "$T" CCP_SIGN_KEY="$KEYS/prive" CCP_SIGNER_ID=prive-release CCP_SIGNER_SRC=lib/prive.sh CCP_SIGNER_COPIES=
+# La liste PAR DÉFAUT : les installeurs sont des actifs signés, et la garde juge chaque actif.
+defaut_arbre() { # defaut_arbre <nom> : tous les fichiers de la liste publique, factices
+  pub_arbre "$1"
+  local plat exe
+  printf 'x\n' > "$T/Claude.command"; printf 'x\n' > "$T/claude.cmd"; printf 'x\n' > "$T/claude-classic.cmd"
+  for plat in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
+    exe=""; [ "$plat" = win32-x64 ] && exe=.exe
+    mkdir -p "$T/dist/$plat"; printf 'binaire factice\n' > "$T/dist/$plat/baluchon-core$exe"
+  done
+}
+defaut_arbre defaut-propre
+expect "liste par défaut (CCP_ASSETS vide) : release complète" 0 rel "$T" CCP_SIGNER_ID=baluchon-release CCP_ASSETS=
+grep -q ' install\.sh$' "$T/sortie/SHA256SUMS" && grep -q ' install\.ps1$' "$T/sortie/SHA256SUMS" \
+  && verdict vrai "…install.sh et install.ps1 figurent dans SHA256SUMS (actifs signés)" \
+  || verdict faux "…install.sh et install.ps1 figurent dans SHA256SUMS (actifs signés)" "$(cat "$T/sortie/SHA256SUMS" 2>&1)"
+defaut_arbre defaut-contamine
+printf '%s\n' "$ECRIT" > "$T/dist/linux-x64/baluchon-core"
+expect "liste par défaut dont un binaire sait écrire" 1 rel "$T" CCP_SIGNER_ID=baluchon-release CCP_ASSETS=
+dit "…la garde lecture seule la refuse" "la garde lecture seule refuse la release"
 
 echo
 printf '%d ok, %d ko\n' "$OK" "$KO"
