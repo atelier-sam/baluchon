@@ -352,7 +352,14 @@ menu_update() {
 do_wipe() {
   clear 2>/dev/null || true
   if gum confirm "Tout déconnecter et effacer les sessions de ce portable ?" --selected.background "$ORANGE"; then
-    cc_wipe; good "✓ Effacé (Trousseau compris). Révoque les jetons sur claude.ai si la clé a été perdue."
+    local wrc=0; cc_wipe || wrc=$?
+    case "$wrc" in
+      0) good "✓ Effacé (Trousseau compris). Révoque les jetons sur claude.ai si la clé a été perdue." ;;
+      2) bad "Effacé, mais une session Claude restait ouverte : ferme-la, puis refais « Tout effacer »." ;;
+      *) bad "⚠ Effacement INCOMPLET : ce qui reste est utilisable."
+         printf '%s\n' "$CC_WIPE_NOTE" | sed 's/^/  /'
+         read -r -p "  Entrée pour revenir au menu… " _ < /dev/tty 2>/dev/null || sleep 8 ;;
+    esac
   else note "Annulé."; fi
   sleep 2
 }

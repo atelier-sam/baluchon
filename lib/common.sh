@@ -495,9 +495,37 @@ cc_purge_sessions() {
 cc_purge_keychain() { cc_purge_sessions; }
 # Efface toutes les sessions et jetons du portable (Trousseau compris), et les jetons
 # Cloudflare Access que la liaison avec le Mac a laissés dans ~/.cloudflared.
+# Code retour (ce qui RESTE est dit dans CC_WIPE_NOTE, jamais avalé) :
+#   0 = tout effacé ; 2 = effacé, mais une session Claude encore ouverte peut réécrire ses
+#   identifiants ; 10 = des jetons Cloudflare Access restent UTILISABLES ; 1 = sessions mal effacées.
+# WHY : avant, les deux échecs étaient ignorés et le menu affichait « ✓ Effacé » ; sur un poste
+# prêté, un jeton Access resté en place rouvrait la liaison avec le Mac (même défaut que celui
+# que la revue Codex avait trouvé dans uninstall.sh).
+# Si l'effacement des jetons Access échoue, config/remote.conf est GARDÉ : c'est lui qui dit quel
+# hôte oublier ; sans lui, une nouvelle tentative répondrait « aucun Mac configuré » et réussirait
+# sans rien effacer. Il ne contient aucun secret (hôte, utilisateur, options).
 cc_wipe() {
-  cc_purge_keychain
-  ccp_core remote forget-access >/dev/null 2>&1 || true
-  rm -rf "$ROOT"/config/* 2>/dev/null || true
+  local prc=0 frc=0 sortie="" f
+  CC_WIPE_NOTE=""
+  cc_purge_keychain || prc=$?
+  if [ -n "${CORE:-}" ]; then
+    sortie="$(ccp_core remote forget-access 2>&1)" || frc=$?
+  elif [ -f "$ROOT/config/remote.conf" ]; then
+    frc=127; sortie="noyau indisponible : les jetons de ~/.cloudflared n'ont pas pu être cherchés."
+  fi
+  for f in "$ROOT"/config/*; do
+    [ -e "$f" ] || [ -L "$f" ] || continue
+    if [ "$frc" != 0 ] && [ "${f##*/}" = remote.conf ]; then continue; fi
+    rm -rf "$f" 2>/dev/null || true
+  done
   rm -f "$ROOT"/ACTIVE 2>/dev/null || true
+  if [ "$prc" != 0 ] && [ "$prc" != 2 ]; then
+    CC_WIPE_NOTE="Des identifiants Claude n'ont pas pu être effacés (Trousseau ou fichiers de $ROOT/config)."
+  fi
+  if [ "$frc" != 0 ]; then
+    CC_WIPE_NOTE="${CC_WIPE_NOTE}${CC_WIPE_NOTE:+$'\n'}Des jetons Cloudflare Access restent UTILISABLES sur cet ordinateur (code $frc) :"$'\n'"$(printf '%s\n' "$sortie" | head -n 12)"$'\n'"Supprime-les à la main : fichiers dont le nom finit par « -token » dans ~/.cloudflared."
+    return 10
+  fi
+  [ "$prc" = 0 ] || [ "$prc" = 2 ] || return 1
+  return "$prc"
 }
