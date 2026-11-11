@@ -1,5 +1,8 @@
 //! `accounts purge` : retire les identifiants de CE portable (Trousseau + fichiers).
 //!
+//! C'est une SUPPRESSION, demandée par l'utilisateur, de SES PROPRES identifiants : elle reste dans
+//! le contrat « lecture seule » du public (TECHNICAL.md, décision P1) ; aucune écriture n'y a sa place.
+//!
 //! Garde-fous : seuls les services SUFFIXÉS (`Claude Code-credentials-<8 hex>`,
 //! un par `CLAUDE_CONFIG_DIR`) sont supprimés. Le service sans suffixe est la
 //! session Claude Code normale de la machine : `delete_all` le refuse, quoi

@@ -203,8 +203,16 @@ pub trait Extension: Send + Sync {
     fn external(&self, call: &External<'_>) -> Option<Result<i32>>;
 }
 
-/// Édition publique : lecture seule, aucun effet de bord. C'est le comportement
-/// livré aux utilisateurs.
+/// Édition publique : lecture seule. C'est le comportement livré aux utilisateurs.
+///
+/// « Lecture seule » a une définition exacte (TECHNICAL.md, « Le contrat lecture seule ») : ne crée
+/// aucun identifiant, ne renouvelle aucun jeton, n'envoie un jeton que comme en-tête d'une requête
+/// `GET` vers l'API officielle, et n'écrit rien dans le Trousseau ni dans les fichiers
+/// d'identifiants SAUF les supprimer, sur demande de l'utilisateur (`accounts purge`).
+/// Ce n'est donc pas « aucun effet de bord » : la suppression de SES PROPRES identifiants est le
+/// seul effet de bord permis, et aucune des méthodes ci-dessous n'en ajoute un.
+/// (Décision P1 : effacer localement ses propres identifiants n'est ni les collecter ni les
+/// intermédier.)
 pub struct ReadOnly;
 
 impl Extension for ReadOnly {

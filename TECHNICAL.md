@@ -8,7 +8,7 @@
 | `lib/common.sh` | Plateforme, téléchargements vérifiés (fail-closed), mises à jour, choix du noyau, purge de repli. |
 | `core/` → `baluchon-core` | Noyau Rust : comptes, statut, forfait, quotas, lancement verrouillé, outils Windows, accès distant. Contrat CLI versionné (`baluchon-core --contract`). |
 | `claude.cmd` / `claude-classic.cmd` | Lanceurs Windows (wizard / repli 100 % batch). |
-| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée ; désinstallation. |
+| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install`) ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique). Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
 | `scripts/build-core.sh` | Compile `baluchon-core` pour darwin-arm64/x64, linux-x64/arm64 (musl statique), win32-x64 (zig + cargo-zigbuild). |
 | `scripts/release.sh` | Assemble la release à plat, `SHA256SUMS` signé, contre-vérifié avec la clé embarquée. |
 | `overlay/` | Optionnel. Une couche posée à côté du portable (voir « Couches »). Le portable n'y écrit jamais. |
@@ -70,12 +70,42 @@ relancé sur ce compte ; il l'est dès que le jeton est frais. Un jeton d'accès
 
 ## Éditions et couture `Extension`
 
+### Le contrat « lecture seule » (définition exacte)
+
+« Lecture seule » ne veut pas dire « ne supprime jamais rien ». Elle dit précisément ceci. Le
+noyau PUBLIC, qui ne porte que l'édition `ReadOnly` :
+
+1. **ne crée aucun identifiant** : il n'écrit ni `.credentials.json` ni `oauth.token`, et il ne
+   crée aucun item du Trousseau (`add-generic-password` est interdit, source et binaire) ;
+2. **ne renouvelle aucun jeton** : aucune requête qui échange un jeton de renouvellement
+   (`grant_type`, `/v1/oauth/token` interdits), aucune requête avec un corps (`http::Method` n'a
+   que `Get`) ;
+3. **n'envoie aucun identifiant** hors du seul cas de la lecture : le jeton d'accès sert d'en-tête
+   `Authorization` d'une requête `GET` vers l'API officielle (`api.anthropic.com`, `env.rs`) pour
+   lire le profil et l'usage, jamais sous une autre forme, jamais vers un autre hôte, jamais dans
+   un journal ni une sortie ;
+4. **n'écrit rien dans le Trousseau ni dans les fichiers d'identifiants, sauf SUPPRIMER** les items
+   de CE portable (service suffixé `Claude Code-credentials-<8 hex>`) et les fichiers de ses
+   profils (`.credentials.json`, `oauth.token`…), et seulement sur DEMANDE de l'utilisateur : « Tout
+   déconnecter » (`accounts purge`), une désinstallation, ou la sortie d'un ordinateur marqué
+   « invité ». L'item sans suffixe (le Claude Code normal de la machine) n'est jamais touché.
+
+Pourquoi la suppression n'entre pas dans « écrire » : décision P1 (revue Codex terminale). Effacer
+SES PROPRES identifiants, localement, à la demande de leur propriétaire, n'est ni les collecter,
+ni les stocker, ni les intermédier au sens des conditions d'Anthropic ; c'est l'inverse, et
+c'est le geste qui protège un poste de passage. La garde (`scripts/garde-lecture-seule.sh`)
+l'exprime ainsi : `delete-generic-password` n'est permis que dans `fn delete_all`, qui refuse le
+service sans suffixe quoi qu'on lui passe. Tout le reste de la liste ci-dessus reste interdit
+mécaniquement, y compris dans les binaires livrés.
+
 Le noyau n'écrit aucun identifiant. Tout ce qui pourrait en écrire (renouveler un jeton,
 rejouer un journal d'écriture, écrire un magasin) passe par le trait `Extension`
 (`core/src/ext.rs`), que l'exécutable choisit au démarrage :
 `run_with(Arc::new(ReadOnly), std::env::args_os())` dans `core/src/main.rs`.
 
-L'édition fournie, `ReadOnly` (`about --json` : `"edition":"public"`), n'a aucun effet de bord.
+L'édition fournie, `ReadOnly` (`about --json` : `"edition":"public"`), respecte le contrat
+ci-dessus : ses points d'extension n'ont aucun effet ; le seul effet de bord du noyau est la
+suppression, sur demande, de SES PROPRES identifiants.
 Une édition étendue est une AUTRE crate (sans workspace commun, son propre `Cargo.lock` et son
 `deny.toml`), qui dépend de la lib `baluchon_core` par chemin et appelle la même `run_with`
 avec son implémentation. Le nom de la lib, `baluchon_core`, et le trait `Extension` sont l'API
@@ -233,4 +263,11 @@ Les deux scripts servent à toute édition sans être copiés : `build-core.sh` 
 l'en-tête du script).
 
 Puis publier `dist/release/*` comme assets d'une release : les installeurs lisent
-`github.com/atelier-sam/baluchon/releases/latest/download/`.
+`github.com/atelier-sam/baluchon/releases/latest/download/`. `install.sh` et `install.ps1`
+font partie des assets (donc des sommes signées) : un script qui doit lancer l'installeur
+sans le télécharger depuis une branche le prend dans `releases/download/<tag>/`, vérifie
+`SHA256SUMS` contre la clé publique `baluchon-release` (`ssh-keygen -Y verify -n file`), puis
+contrôle l'empreinte de l'installeur, avant de l'exécuter. Garde de périmètre : l'identité
+`baluchon-release` (ou sa clé) fait toujours juger l'ensemble des assets par
+`scripts/garde-lecture-seule.sh`, même avec `CCP_ASSETS` : une release à périmètre élargi ne
+peut pas être signée avec la clé publique.
