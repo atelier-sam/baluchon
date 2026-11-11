@@ -41,6 +41,12 @@ ssh-keygen -Y verify -f "$W/allowed_signers" -I "$CCP_SIGNER_ID" -n file -s "$W/
   || die "Signature de la release INVALIDE : installation annulée."
 ok "Release authentifiée (signature $CCP_SIGNER_ID)"
 
+# Le marqueur par lequel uninstall.sh reconnaît CE dossier comme une installation de Baluchon : sans
+# lui, la désinstallation refuse d'effacer quoi que ce soit (revue Codex : une comparaison de
+# chaînes ne protège pas le domicile). Posé AVANT tout le reste, après la signature.
+mkdir -p "$DIR"
+printf 'baluchon-install 1\n' > "$DIR/.baluchon-install"
+
 # Télécharge un fichier de la release et le vérifie contre SHA256SUMS. $1 = nom publié, $2 = destination.
 fetch() {
   local want

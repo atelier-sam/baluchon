@@ -47,6 +47,11 @@ jetons Cloudflare Access laissés par la liaison avec un Mac. L'item « Claude
 Code-credentials » sans suffixe, celui de ton Claude Code habituel, n'est jamais touché.
 Pour effacer seulement tes comptes : dans le wizard, « Tout déconnecter ».
 
+Garde-fou : la désinstallation n'efface qu'un dossier qui porte le marqueur
+`.baluchon-install` (posé par l'installeur) et refuse `/`, ton domicile et tout dossier qui le
+contient, après résolution des liens et des `.` / `..`. Une installation d'avant ce marqueur :
+réinstalle, ou crée le marqueur toi-même (le message de refus donne la commande).
+
 ## Ce que fait le wizard
 
 - **Accueil** : un tableau par compte — email, forfait (Max x20 / x5 / Pro),

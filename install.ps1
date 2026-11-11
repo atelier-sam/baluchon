@@ -37,6 +37,9 @@ function Get($url, $out) { Invoke-WebRequest -Uri $url -OutFile $out -UseBasicPa
 
 New-Item -ItemType Directory -Force -Path $W, "$Dir\lib", "$Dir\bin\$Plat", "$Dir\bin\win32-x64", "$Dir\tools\gum\win32-x64", "$Dir\git-win" | Out-Null
 Say "Installation de Baluchon dans $Dir"
+# Marqueur d'installation (le meme que celui de install.sh) : c'est par lui qu'un desinstalleur sait que
+# ce dossier est a nous, et qu'il refuse d'effacer tout autre dossier.
+[IO.File]::WriteAllText("$Dir\.baluchon-install", "baluchon-install 1`n")
 
 # --- 1) Git portable d'abord si ssh-keygen manque (il en fournit un) ---------
 function Install-PortableGit {
