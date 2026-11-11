@@ -6,8 +6,14 @@
 #  Supprime TOUT : binaires, interface, sessions, l'item Trousseau macOS de chaque profil,
 #  les jetons Cloudflare Access laissés par la liaison avec le Mac, et la couche
 #  (overlay/) éventuelle, après avoir appelé son crochet `uninstall`.
-#  Il ne supprime QUE un dossier qui porte le marqueur d'installation (.baluchon-install) et qui
-#  n'est ni « / », ni ton domicile, ni un parent de ton domicile (chemin canonique, liens suivis).
+#  Il ne supprime QUE un dossier qui porte le marqueur d'installation (.baluchon-install), qui
+#  n'est ni « / », ni ton domicile, ni un parent de ton domicile (chemin canonique, liens suivis),
+#  et dont aucun ancêtre ne peut être modifié par un autre utilisateur.
+#
+#  Codes de sortie : 0 = tout est effacé ; 1 = rien à désinstaller ou annulé ; 2 = refusé (rien n'est
+#  supprimé) ; 10 = des jetons Cloudflare Access restent utilisables ; 11 = la purge des sessions
+#  est incomplète ; 12 = le dossier n'a pas pu être supprimé en entier. Un code 10, 11 ou 12 dit
+#  ce qui reste, sur la sortie d'erreur : jamais « Plus aucune trace » dans ce cas.
 # ============================================================
 set -uo pipefail
 DIR_DEMANDE="${BALUCHON_DIR:-$HOME/.baluchon}"
@@ -22,11 +28,40 @@ OUI=0
 #   1. chemin canonique (liens, « . » et « .. » résolus : `cd -P` + `pwd -P`) ;
 #   2. jamais « / », jamais le domicile, jamais un parent du domicile ;
 #   3. le MARQUEUR que l'installeur pose (.baluchon-install, première ligne « baluchon-install 1 »),
-#      fichier ordinaire (pas un lien). Sans marqueur, ce n'est pas notre dossier : rien n'est effacé.
+#      fichier ordinaire (pas un lien). Sans marqueur, ce n'est pas notre dossier : rien n'est effacé ;
+#   4. aucun ANCÊTRE du dossier ne peut être modifié par un autre utilisateur (écriture de groupe ou
+#      du monde sans bit « sticky », ou propriétaire autre que toi ou root) : sinon cet autre
+#      utilisateur pourrait remplacer un maillon du chemin par un lien APRÈS ce jugement (revue
+#      Codex, 2e passe : l'effacement résolvait le chemin une seconde fois) ;
+#   5. l'identité du dossier (périphérique:inode) est relevée ICI, et revérifiée juste avant chaque
+#      geste qui passe par son chemin (crochet, noyau, effacement). L'effacement part du dossier
+#      PARENT figé (`cd -P`, puis un nom relatif) : un maillon d'ancêtre échangé après coup n'y
+#      change plus rien, et une différence d'identité est un refus.
 MARQUEUR=".baluchon-install"
 MARQUEUR_TEXTE="baluchon-install 1"
 refus() { printf '✗ %s Rien n'"'"'est supprimé.\n' "$1" >&2; exit 2; }
 canonique() { ( cd -P -- "$1" 2>/dev/null && pwd -P ); }
+# « périphérique:inode » d'un chemin ; vide et code 1 si illisible. GNU d'abord (`stat -c`), BSD ensuite
+# (`stat -f`) : sur GNU, `-f` veut dire autre chose (système de fichiers), d'où cet ordre.
+identite() {
+  local i
+  i="$(stat -c '%d:%i' -- "$1" 2>/dev/null)" && [ -n "$i" ] && { printf '%s\n' "$i"; return 0; }
+  i="$(stat -f '%d:%i' "$1" 2>/dev/null)" && [ -n "$i" ] && { printf '%s\n' "$i"; return 0; }
+  return 1
+}
+# 0 si SEUL toi (ou root) peut ajouter, renommer ou retirer une entrée de ce dossier : propriétaire
+# toi ou root, et pas d'écriture de groupe ou du monde (sauf bit sticky, qui réserve chaque entrée à
+# son propriétaire). Les ACL étendues ne se lisent pas ici : limite connue.
+ancetre_sur() {
+  local ligne mode uid
+  ligne="$(ls -ldn -- "$1" 2>/dev/null)" || return 1
+  read -r mode _ uid _ <<< "$ligne"
+  case "$uid" in "$(id -u)"|0) ;; *) return 1 ;; esac
+  case "${mode:5:1}${mode:8:1}" in
+    *w*) case "${mode:9:1}" in t|T) ;; *) return 1 ;; esac ;;
+  esac
+  return 0
+}
 
 [ -d "$DIR_DEMANDE" ] || { echo "Aucun dossier d'installation à « $DIR_DEMANDE » : rien à désinstaller." >&2; exit 1; }
 DIR="$(canonique "$DIR_DEMANDE")"
@@ -41,6 +76,46 @@ esac
 if [ -L "$DIR/$MARQUEUR" ] || [ ! -f "$DIR/$MARQUEUR" ] || [ "$(head -n 1 "$DIR/$MARQUEUR" 2>/dev/null)" != "$MARQUEUR_TEXTE" ]; then
   refus "« $DIR » ne porte pas le marqueur d'une installation de Baluchon ($MARQUEUR). Si c'est bien une installation ancienne : réinstalle (install.sh le pose), ou crée-le toi-même avec  printf '%s\\n' '$MARQUEUR_TEXTE' > '$DIR/$MARQUEUR'."
 fi
+PARENT="$(dirname -- "$DIR")"
+LEAF="$(basename -- "$DIR")"
+ancetre="$PARENT"
+while :; do
+  ancetre_sur "$ancetre" \
+    || refus "L'ancêtre « $ancetre » de « $DIR » peut être modifié par un autre utilisateur (écriture de groupe ou du monde sans bit sticky, ou propriétaire étranger) : il pourrait y glisser un lien entre le jugement et l'effacement. Supprime le dossier toi-même si tu es sûr de ce que tu fais."
+  [ "$ancetre" != "/" ] || break
+  ancetre="$(dirname -- "$ancetre")"
+done
+ID_DIR="$(identite "$DIR")" || refus "L'identité du dossier « $DIR » n'a pas pu être relevée."
+ID_PARENT="$(identite "$PARENT")" || refus "L'identité du dossier parent « $PARENT » n'a pas pu être relevée."
+
+# Le dossier jugé est-il toujours LE MÊME ? (même chemin physique, même périphérique et même inode)
+# À rappeler avant chaque geste qui repasse par son chemin.
+meme_dossier() {
+  [ "$(canonique "$DIR")" = "$DIR" ] && [ "$(identite "$DIR")" = "$ID_DIR" ]
+}
+refus_tard() {
+  printf '✗ %s Le dossier « %s » n'"'"'est PAS supprimé.\n' "$1" "$DIR" >&2
+  exit 2
+}
+verifie_ou_refuse() { meme_dossier || refus_tard "Le dossier d'installation a changé (lien ou dossier remplacé) depuis qu'il a été jugé."; }
+
+# Dossier de la génération courante de la couche (voir TECHNICAL.md, « Couches ») : `overlay/CURRENT`
+# la désigne (« gen/<nom> ») ; sans pointeur, la couche est à plat dans overlay/.
+couche_dir() {
+  local p
+  if [ -f "$DIR/overlay/CURRENT" ] && [ ! -L "$DIR/overlay/CURRENT" ]; then
+    p="$(head -n 1 "$DIR/overlay/CURRENT" 2>/dev/null | tr -d '\r')"
+    case "$p" in
+      gen/[A-Za-z0-9]*) ;;
+      *) return 1 ;;
+    esac
+    case "${p#gen/}" in */*|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    [ -d "$DIR/overlay/$p" ] && [ ! -L "$DIR/overlay/$p" ] || return 1
+    printf '%s\n' "$DIR/overlay/$p"
+    return 0
+  fi
+  printf '%s\n' "$DIR/overlay"
+}
 
 echo "Cela va supprimer :"
 echo "  - $DIR   (binaires, interface, SESSIONS, couche éventuelle)"
@@ -51,17 +126,36 @@ if [ "$OUI" != 1 ]; then
   if [ -t 0 ]; then read -r ans; else read -r ans < /dev/tty 2>/dev/null || ans=""; fi
   [ "$ans" = "OUI" ] || { echo "Annulé."; exit 1; }
 fi
+verifie_ou_refuse
 
 # Le noyau qui sait le mieux effacer : celui de la couche s'il y en a un qui répond, sinon le public.
 # Chaque candidat doit répondre à --contract (un binaire d'une autre plateforme n'est pas choisi).
 CORE=""
-for c in "$DIR"/overlay/bin/*/baluchon-core "$DIR"/bin/*/baluchon-core; do
-  [ -x "$c" ] || continue
-  "$c" --contract >/dev/null 2>&1 && { CORE="$c"; break; }
-done
+choisir_noyau() { # choisir_noyau <candidat>... : pose CORE au premier qui répond à --contract
+  local c
+  for c in "$@"; do
+    [ -x "$c" ] || continue
+    "$c" --contract >/dev/null 2>&1 && { CORE="$c"; return 0; }
+  done
+  return 1
+}
+LDIR="$(couche_dir || true)"
+[ -z "$LDIR" ] || choisir_noyau "$LDIR"/bin/*/baluchon-core || true
+[ -n "$CORE" ] || choisir_noyau "$DIR"/bin/*/baluchon-core || true
+
+# Ce qui n'a pas pu être effacé : dit à la fin, jamais avalé (revue Codex, 2e passe : un jeton Access
+# non supprimable restait utilisable et le script annonçait « Plus aucune trace »).
+CODE_SORTIE=0
+BILAN=""
+incomplet() { # incomplet <code> <texte>
+  [ "$CODE_SORTIE" != 0 ] || CODE_SORTIE="$1"
+  BILAN="${BILAN}${BILAN:+$'\n'}$2"
+}
+indente() { printf '%s\n' "$1" | sed 's/^/      /' | head -n 20; }
 
 # 1) Le crochet de la couche défait ce que la couche a posé hors de overlay/.
 if [ -f "$DIR/overlay/hooks/uninstall" ]; then
+  verifie_ou_refuse
   BALUCHON_ROOT="$DIR" bash "$DIR/overlay/hooks/uninstall" \
     || echo "  ⚠ Le crochet uninstall de la couche a échoué : on continue, le dossier est supprimé en entier." >&2
 fi
@@ -73,8 +167,12 @@ fi
 # dossier. Surtout pas « Claude Code-credentials » sans suffixe : c'est la
 # session du Claude Code normal de la machine (~/.claude), pas la nôtre.
 if [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ]; then
+  verifie_ou_refuse
   if [ -n "$CORE" ]; then
-    "$CORE" --root "$DIR" accounts purge >/dev/null 2>&1 || true
+    sortie="$("$CORE" --root "$DIR" accounts purge 2>&1)"; rc=$?
+    if [ "$rc" != 0 ]; then
+      incomplet 11 "La purge des sessions est incomplète (code $rc) :"$'\n'"$(indente "$sortie")"
+    fi
   fi
   for d in "$DIR"/config/*/; do
     [ -d "$d" ] || continue
@@ -85,14 +183,34 @@ if [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ]; then
 fi
 
 # 3) Jetons Cloudflare Access de ~/.cloudflared (application ET équipe) : sans eux, plus personne
-# ne peut rouvrir la liaison avec le Mac depuis cet ordinateur.
+# ne peut rouvrir la liaison avec le Mac depuis cet ordinateur. Le bilan du noyau (code 10, noms
+# seulement) remonte tel quel ; sans noyau qui réponde, on ne peut pas savoir ce qui reste.
 if [ -n "$CORE" ]; then
-  "$CORE" --root "$DIR" remote forget-access >/dev/null 2>&1 || true
+  verifie_ou_refuse
+  sortie="$("$CORE" --root "$DIR" remote forget-access 2>&1)"; rc=$?
+  if [ "$rc" != 0 ]; then
+    incomplet 10 "Des jetons Cloudflare Access restent UTILISABLES sur cet ordinateur (code $rc) :"$'\n'"$(indente "$sortie")"
+  fi
+elif [ -f "$DIR/config/remote.conf" ]; then
+  incomplet 10 "Aucun noyau n'a répondu : les jetons Cloudflare Access éventuels (fichiers « …-token » de ~/.cloudflared) n'ont pas pu être effacés."
 fi
 
-# On efface le dossier PHYSIQUE jugé plus haut (jamais le chemin tel que tapé), puis le lien qui y
-# menait s'il y en avait un.
-rm -rf "$DIR"
+# On efface le dossier PHYSIQUE jugé plus haut, sans repasser par son chemin : on entre dans le dossier
+# PARENT figé (cwd = un descripteur : plus aucun lien d'ancêtre n'y change rien), on y revérifie son
+# identité et celle du dossier, puis on supprime par un nom RELATIF. Un sous-shell : le répertoire
+# courant du script ne change pas (BALUCHON_DIR peut être relatif).
+(
+  cd -P -- "$PARENT" 2>/dev/null || exit 3
+  [ "$(pwd -P)" = "$PARENT" ] && [ "$(identite .)" = "$ID_PARENT" ] || exit 3
+  [ -d "./$LEAF" ] && [ ! -L "./$LEAF" ] && [ "$(identite "./$LEAF")" = "$ID_DIR" ] || exit 3
+  rm -rf -- "./$LEAF"
+)
+rc_rm=$?
+[ "$rc_rm" -ne 3 ] || refus_tard "Le dossier d'installation a changé (lien ou dossier remplacé) depuis qu'il a été jugé."
+if [ -e "$DIR" ] || [ -L "$DIR" ]; then
+  incomplet 12 "Le dossier « $DIR » n'a pas pu être supprimé en entier (code $rc_rm)."
+fi
+# Puis le lien qui y menait, s'il y en avait un.
 if [ -L "$DIR_DEMANDE" ]; then rm -f "$DIR_DEMANDE"; fi
 
 # 4) Les commandes : seulement celles qui lancent CE dossier (`ccp` peut être un autre programme).
@@ -104,5 +222,13 @@ for n in baluchon baluchon1 ccp ccp1; do
   fi
 done
 
-echo "✓ Désinstallé. Plus aucune trace de Baluchon sur cette machine."
-echo "  (Pense à révoquer la session sur https://claude.ai si la machine n'est pas la tienne.)"
+if [ "$CODE_SORTIE" = 0 ]; then
+  echo "✓ Désinstallé. Plus aucune trace de Baluchon sur cette machine."
+  echo "  (Pense à révoquer la session sur https://claude.ai si la machine n'est pas la tienne.)"
+else
+  echo "⚠ Désinstallation INCOMPLÈTE :" >&2
+  printf '%s\n' "$BILAN" | sed 's/^/  /' >&2
+  echo "  Ce qui reste est utilisable : traite-le à la main (jetons : fichiers « …-token » de ~/.cloudflared)." >&2
+  echo "  (Pense à révoquer la session sur https://claude.ai si la machine n'est pas la tienne.)" >&2
+fi
+exit "$CODE_SORTIE"

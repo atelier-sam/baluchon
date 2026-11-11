@@ -17,7 +17,16 @@
 #      si elles lancent ce dossier, et SEULEMENT celles-là ;
 #    - une installation atteinte par un LIEN SYMBOLIQUE est effacée à sa vraie place, le lien
 #      aussi, et le domicile reste intact ;
-#    - un marqueur posé dans le domicile ne rend pas le domicile effaçable.
+#    - un marqueur posé dans le domicile ne rend pas le domicile effaçable ;
+#    - (2e passe Codex) le bilan du ménage remonte : un effacement de jetons ou de sessions incomplet
+#      donne un code non nul (10 / 11 / 12) et un message qui NOMME ce qui reste, jamais « Plus aucune
+#      trace » ; contrôle positif joué contre l'ANCIEN script (commit 9975006, lu dans l'historique git) ;
+#    - un ancêtre modifiable par d'autres (777, 775 sans bit sticky) est refusé, un ancêtre « sticky »
+#      (1777, comme /tmp) est accepté ;
+#    - un maillon du chemin (ancêtre ou dossier) ÉCHANGÉ contre un lien entre le jugement et l'effacement
+#      — par le crochet de la couche, ou en dernier recours par le noyau, juste avant l'effacement —
+#      donne un refus (code 2) et la cible du lien (un faux « domicile ») reste intacte ; le même
+#      échange rejoué contre l'ANCIEN script supprime la cible (contrôle positif).
 #
 #  Le Trousseau et le noyau sont des FAUX (dans le PATH / le dossier d'essai) : aucun vrai item,
 #  aucun vrai jeton, aucun vrai `claude`. Rien n'est jamais supprimé hors de <dossier-vide-absolu>.
@@ -87,12 +96,12 @@ faire_install() { # faire_install <dossier>
 }
 
 lancer() { # lancer <BALUCHON_DIR ou rien> [dossier-de-travail] : uninstall.sh --oui dans le faux domicile
-  local dir="$1" cwd="${2:-$BASE}"
+  local dir="$1" cwd="${2:-$BASE}" script="${SCRIPT_SOUS_TEST:-$UNINSTALL}"
   LAST_RC=0
   if [ "$dir" = "@absent@" ]; then
-    LAST_OUT="$(cd "$cwd" && env -i HOME="$H" PATH="$FAUX:/usr/bin:/bin:/usr/sbin:/sbin" bash "$UNINSTALL" --oui 2>&1 < /dev/null)" || LAST_RC=$?
+    LAST_OUT="$(cd "$cwd" && env -i HOME="$H" PATH="$FAUX:/usr/bin:/bin:/usr/sbin:/sbin" bash "$script" --oui 2>&1 < /dev/null)" || LAST_RC=$?
   else
-    LAST_OUT="$(cd "$cwd" && env -i HOME="$H" PATH="$FAUX:/usr/bin:/bin:/usr/sbin:/sbin" BALUCHON_DIR="$dir" bash "$UNINSTALL" --oui 2>&1 < /dev/null)" || LAST_RC=$?
+    LAST_OUT="$(cd "$cwd" && env -i HOME="$H" PATH="$FAUX:/usr/bin:/bin:/usr/sbin:/sbin" BALUCHON_DIR="$dir" bash "$script" --oui 2>&1 < /dev/null)" || LAST_RC=$?
   fi
 }
 # ARRÊT DE SÉCURITÉ : si un uninstall.sh défaillant laisse passer une cible dangereuse, les cas
@@ -219,6 +228,165 @@ faire_install "$BASE/portable2"
 lancer "portable2" "$BASE"
 [ "$LAST_RC" -eq 0 ] && [ ! -e "$BASE/portable2" ] && verdict vrai "BALUCHON_DIR relatif (portable2, depuis le dossier parent) : désinstallé" || verdict faux "BALUCHON_DIR relatif : désinstallé" "$LAST_RC $LAST_OUT"
 temoins_intacts && verdict vrai "…les témoins du domicile sont intacts" || verdict faux "…les témoins du domicile sont intacts"
+
+# ── L'ANCIEN script (commit 9975006), pour les CONTRÔLES POSITIFS des sections 7 et 9 ───────────────
+# Une épreuve qui n'a jamais été vue rouge sur le vrai défaut ne prouve rien : on rejoue donc la même
+# attaque contre le script d'avant la 2e revue Codex et on exige qu'elle RÉUSSISSE. Il vient de
+# l'historique git ; sans historique (archive exportée), les contrôles sont sautés et DITS tels.
+ANCIEN="$BASE/uninstall-ancien.sh"
+if env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git -C "$HERE" show 9975006:uninstall.sh > "$ANCIEN" 2>/dev/null && [ -s "$ANCIEN" ]; then
+  A_ANCIEN=1
+else
+  A_ANCIEN=0; rm -f "$ANCIEN"
+  echo "(!) historique git absent : les contrôles positifs sur l'ancien script (9975006) sont sautés"
+fi
+
+echo "== 7. le bilan du ménage remonte : jamais « Plus aucune trace » quand des jetons restent =="
+# Revue Codex, 2e passe : uninstall.sh jetait la sortie de `remote forget-access`, ignorait son échec
+# et annonçait « Plus aucune trace » alors qu'un jeton Access restait utilisable.
+faire_noyau() { # faire_noyau <dossier> <code de accounts purge> <code de remote forget-access>
+  local d="$1"
+  mkdir -p "$d/bin/plat"
+  cat > "$d/bin/plat/baluchon-core" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" = "--contract" ] && exit 0
+printf '%s\n' "\$*" >> "$JOURNAL_NOYAU"
+case "\$*" in
+  *"accounts purge"*)
+    [ "$2" = 0 ] || echo "purge : profil p1 non effacé (PermissionDenied)" >&2
+    exit $2 ;;
+  *"remote forget-access"*)
+    if [ "$3" != 0 ]; then
+      echo "effacement INCOMPLET des jetons Cloudflare Access" >&2
+      echo "mac-app-token : non effacé (PermissionDenied)" >&2
+    fi
+    exit $3 ;;
+esac
+exit 0
+EOF
+  chmod +x "$d/bin/plat/baluchon-core"
+}
+INST7="$BASE/bilan-forget"
+faire_install "$INST7"; faire_noyau "$INST7" 0 10
+lancer "$INST7"
+[ "$LAST_RC" -eq 10 ] && verdict vrai "forget-access incomplet (code 10 du noyau) : uninstall.sh sort en 10" || verdict faux "forget-access incomplet : uninstall.sh sort en 10" "$LAST_RC $LAST_OUT"
+case "$LAST_OUT" in *"mac-app-token"*) verdict vrai "…et le bilan NOMME ce qui reste" ;; *) verdict faux "…et le bilan NOMME ce qui reste" "$LAST_OUT" ;; esac
+case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "…et ne dit JAMAIS « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "…et ne dit JAMAIS « Plus aucune trace »" ;; esac
+case "$LAST_OUT" in *"UTILISABLES"*) verdict vrai "…et avertit que les jetons restent utilisables" ;; *) verdict faux "…et avertit que les jetons restent utilisables" "$LAST_OUT" ;; esac
+[ ! -e "$INST7" ] && temoins_intacts && verdict vrai "…le dossier est quand même supprimé, les témoins du domicile intacts" || verdict faux "…le dossier est quand même supprimé, les témoins du domicile intacts"
+
+INST7B="$BASE/bilan-ok"
+faire_install "$INST7B"; faire_noyau "$INST7B" 0 0
+lancer "$INST7B"
+[ "$LAST_RC" -eq 0 ] && verdict vrai "forget-access complet : code 0" || verdict faux "forget-access complet : code 0" "$LAST_RC $LAST_OUT"
+case "$LAST_OUT" in *"Plus aucune trace"*) verdict vrai "…et « Plus aucune trace » est dit" ;; *) verdict faux "…et « Plus aucune trace » est dit" "$LAST_OUT" ;; esac
+
+INST7C="$BASE/bilan-sans-noyau"
+faire_install "$INST7C"; rm -f "$INST7C/bin/plat/baluchon-core"
+printf 'host = mac.example.test\n' > "$INST7C/config/remote.conf"
+lancer "$INST7C"
+[ "$LAST_RC" -eq 10 ] && verdict vrai "aucun noyau ne répond mais un Mac est configuré : code 10" || verdict faux "aucun noyau ne répond mais un Mac est configuré : code 10" "$LAST_RC $LAST_OUT"
+case "$LAST_OUT" in *"Aucun noyau"*) verdict vrai "…et il le dit" ;; *) verdict faux "…et il le dit" "$LAST_OUT" ;; esac
+
+if [ "$(uname -s)" = Darwin ]; then
+  INST7D="$BASE/bilan-purge"
+  faire_install "$INST7D"; faire_noyau "$INST7D" 11 0
+  lancer "$INST7D"
+  [ "$LAST_RC" -eq 11 ] && verdict vrai "purge des sessions incomplète (code 11 du noyau) : uninstall.sh sort en 11" || verdict faux "purge des sessions incomplète : uninstall.sh sort en 11" "$LAST_RC $LAST_OUT"
+  case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "…sans « Plus aucune trace »" "$LAST_OUT" ;; *"PermissionDenied"*) verdict vrai "…sans « Plus aucune trace », avec le bilan" ;; *) verdict faux "…avec le bilan" "$LAST_OUT" ;; esac
+fi
+
+if [ "$A_ANCIEN" = 1 ]; then
+  INST7E="$BASE/bilan-ancien"
+  faire_install "$INST7E"; faire_noyau "$INST7E" 0 10
+  SCRIPT_SOUS_TEST="$ANCIEN" lancer "$INST7E"
+  case "$LAST_OUT" in
+    *"Plus aucune trace"*) [ "$LAST_RC" -eq 0 ] && verdict vrai "CONTRÔLE POSITIF : l'ANCIEN script annonçait « Plus aucune trace » (code 0) malgré un jeton resté" || verdict faux "contrôle positif (ancien script)" "$LAST_RC $LAST_OUT" ;;
+    *) verdict faux "CONTRÔLE POSITIF : l'ANCIEN script aurait dû mentir (« Plus aucune trace »)" "$LAST_RC $LAST_OUT" ;;
+  esac
+fi
+
+echo "== 8. un ancêtre que d'autres utilisateurs peuvent modifier : refus =="
+# Un autre utilisateur qui peut écrire dans un ancêtre peut y remplacer un maillon par un lien APRÈS
+# le jugement. Les cas « propriétaire étranger » ne se jouent pas sans un second compte : seuls les
+# bits de mode se prouvent ici.
+mkdir -p "$BASE/ouvert" && chmod 777 "$BASE/ouvert"
+faire_install "$BASE/ouvert/inst"
+expect_refus "ancêtre inscriptible par tout le monde, sans bit sticky (777)" "$BASE/ouvert/inst"
+case "$LAST_OUT" in *"ancêtre"*) verdict vrai "…le message nomme l'ancêtre" ;; *) verdict faux "…le message nomme l'ancêtre" "$LAST_OUT" ;; esac
+[ -f "$BASE/ouvert/inst/config/p1/.credentials.json" ] && verdict vrai "…l'installation est intacte" || verdict faux "…l'installation est intacte"
+mkdir -p "$BASE/groupe" && chmod 775 "$BASE/groupe"
+faire_install "$BASE/groupe/inst"
+expect_refus "ancêtre inscriptible par le groupe, sans bit sticky (775)" "$BASE/groupe/inst"
+mkdir -p "$BASE/haut/milieu" && chmod 777 "$BASE/haut" && chmod 755 "$BASE/haut/milieu"
+faire_install "$BASE/haut/milieu/inst"
+expect_refus "ancêtre LOINTAIN inscriptible (777, deux niveaux au-dessus)" "$BASE/haut/milieu/inst"
+mkdir -p "$BASE/colle" && chmod 1777 "$BASE/colle"
+faire_install "$BASE/colle/inst"
+lancer "$BASE/colle/inst"
+[ "$LAST_RC" -eq 0 ] && [ ! -e "$BASE/colle/inst" ] && verdict vrai "ancêtre inscriptible mais avec le bit sticky (1777, comme /tmp) : accepté, désinstallé" || verdict faux "ancêtre avec bit sticky : accepté" "$LAST_RC $LAST_OUT"
+# Le crochet de la couche s'exécute entre le jugement et l'effacement : c'est le moment où un tiers
+# échangerait un maillon. On joue cet échange EXACT (un ancêtre devient un lien vers le dossier qui
+# contient la cible visée) et on exige un refus, la cible visée intacte.
+echo "== 9. un maillon du chemin échangé entre le jugement et l'effacement =="
+scenario_ancetre() { # scenario_ancetre <nom> <script> : l'installation est $BASE/<nom>/p/<nom>v ; le crochet échange p
+  local n="$1" ext="$BASE/$1" victime="$BASE/$1v"
+  mkdir -p "$ext/p" "$victime"
+  printf 'precieux\n' > "$victime/temoin.txt"
+  faire_install "$ext/p/${n}v"
+  mkdir -p "$ext/p/${n}v/overlay/hooks"
+  # Après l'échange, $ext/p/<n>v désigne $BASE/<n>v : la VICTIME (le « domicile » de l'attaque de Codex).
+  printf '#!/usr/bin/env bash\nmv "%s/p" "%s/p.reel" && ln -s "%s" "%s/p"\n' "$ext" "$ext" "$BASE" "$ext" > "$ext/p/${n}v/overlay/hooks/uninstall"
+  SCRIPT_SOUS_TEST="$2" lancer "$ext/p/${n}v"
+}
+scenario_ancetre echange-nouveau "$UNINSTALL"
+[ "$LAST_RC" -eq 2 ] && verdict vrai "ancêtre échangé après le jugement : refus (code 2)" || verdict faux "ancêtre échangé après le jugement : refus (code 2)" "$LAST_RC $LAST_OUT"
+[ "$(cat "$BASE/echange-nouveauv/temoin.txt" 2>/dev/null)" = precieux ] && verdict vrai "…la cible visée par le lien (le « domicile ») est INTACTE" || verdict faux "…la cible visée par le lien est INTACTE" "$LAST_OUT"
+[ -f "$BASE/echange-nouveau/p.reel/echange-nouveauv/config/p1/.credentials.json" ] && verdict vrai "…et l'installation d'origine n'a pas été touchée par le lien" || verdict faux "…et l'installation d'origine n'a pas été touchée"
+case "$LAST_OUT" in *"a changé"*) verdict vrai "…et le message dit que le dossier a changé" ;; *) verdict faux "…et le message dit que le dossier a changé" "$LAST_OUT" ;; esac
+if [ "$A_ANCIEN" = 1 ]; then
+  scenario_ancetre echange-ancien "$ANCIEN"
+  [ ! -e "$BASE/echange-ancienv/temoin.txt" ] \
+    && verdict vrai "CONTRÔLE POSITIF : le même échange fait supprimer la cible par l'ANCIEN script (l'attaque de Codex réussissait)" \
+    || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû supprimer la cible" "$LAST_RC $LAST_OUT"
+fi
+# Le dernier maillon (le dossier lui-même) remplacé par un lien vers la victime.
+fn=feuille-nouveau; ext="$BASE/$fn"; mkdir -p "$ext/p" "$BASE/${fn}v"
+printf 'precieux\n' > "$BASE/${fn}v/temoin.txt"
+faire_install "$ext/p/inst"
+mkdir -p "$ext/p/inst/overlay/hooks"
+printf '#!/usr/bin/env bash\nmv "%s/p/inst" "%s/p/inst.reel" && ln -s "%s/%sv" "%s/p/inst"\n' "$ext" "$ext" "$BASE" "$fn" "$ext" > "$ext/p/inst/overlay/hooks/uninstall"
+lancer "$ext/p/inst"
+[ "$LAST_RC" -eq 2 ] && [ "$(cat "$BASE/${fn}v/temoin.txt" 2>/dev/null)" = precieux ] \
+  && verdict vrai "dossier remplacé par un lien après le jugement : refus (code 2), cible intacte" \
+  || verdict faux "dossier remplacé par un lien après le jugement : refus, cible intacte" "$LAST_RC $LAST_OUT"
+# La fenêtre la plus étroite : l'échange arrive APRÈS la dernière revérification (c'est le noyau, appelé
+# juste avant l'effacement, qui l'opère). Seul l'effacement ancré sur le dossier PARENT figé y résiste.
+scenario_fenetre() { # scenario_fenetre <nom> <script> : le faux noyau échange un ancêtre pendant forget-access
+  local n="$1" ext="$BASE/$1" victime="$BASE/$1v"
+  mkdir -p "$ext/p" "$victime"
+  printf 'precieux\n' > "$victime/temoin.txt"
+  faire_install "$ext/p/${n}v"
+  cat > "$ext/p/${n}v/bin/plat/baluchon-core" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" = "--contract" ] && exit 0
+case "\$*" in
+  *"remote forget-access"*) mv "$ext/p" "$ext/p.reel" && ln -s "$BASE" "$ext/p" ;;
+esac
+exit 0
+EOF
+  SCRIPT_SOUS_TEST="$2" lancer "$ext/p/${n}v"
+}
+scenario_fenetre fenetre-nouveau "$UNINSTALL"
+[ "$LAST_RC" -eq 2 ] && [ "$(cat "$BASE/fenetre-nouveauv/temoin.txt" 2>/dev/null)" = precieux ] \
+  && verdict vrai "échange pendant le ménage, après la dernière revérification : l'effacement ancré refuse (code 2), cible intacte" \
+  || verdict faux "échange après la dernière revérification : refus, cible intacte" "$LAST_RC $LAST_OUT"
+if [ "$A_ANCIEN" = 1 ]; then
+  scenario_fenetre fenetre-ancien "$ANCIEN"
+  [ ! -e "$BASE/fenetre-ancienv/temoin.txt" ] \
+    && verdict vrai "CONTRÔLE POSITIF : le même échange fait supprimer la cible par l'ANCIEN script (résolution en double)" \
+    || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû supprimer la cible" "$LAST_RC $LAST_OUT"
+fi
 
 echo
 printf '%d ok, %d ko\n' "$OK" "$KO"
