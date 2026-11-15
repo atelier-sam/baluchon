@@ -120,6 +120,55 @@ cc_check_sha() {
   [ "$got" = "$want" ] || { cc_warn "Empreinte invalide pour $(basename "$f")."; return 1; }
 }
 
+# ─── Références authentifiées ───────────────────────────────────────────────────────────────
+# RÈGLE (revue Codex, 2e passe) : aucun octet n'est exécuté, ni même sondé (`--version`, `--contract`,
+# `about` sont des exécutions), avant d'avoir été comparé à une empreinte AUTHENTIFIÉE, sur une installation
+# posée par l'installeur (marqueur .baluchon-install). Deux sources d'empreintes :
+#   - le manifeste SIGNÉ de la release, conservé dans ROOT/.baluchon-sums + .baluchon-sums.sig : menu,
+#     bibliothèque, désinstalleur, noyau public (cc_sum_signee) ;
+#   - ROOT/.baluchon-refs (« <sha256>  <chemin relatif à ROOT> ») pour ce que ce manifeste ne couvre pas :
+#     le binaire Claude (vérifié contre le manifeste officiel), gum (archive vérifiée contre l'empreinte
+#     épinglée) et le noyau de la couche (sommes signées de la couche, vérifiées par l'amorce). Une ligne
+#     n'est écrite qu'APRÈS que l'empreinte a été vérifiée à la source.
+# Honnêteté sur ce que ça protège : .baluchon-refs est écrit avec les droits de l'utilisateur. Il écarte un
+# fichier remplacé SEUL (corruption, remplacement partiel, gum ou claude échangé) ; il n'arrête pas qui
+# réécrit toute l'installation avec ces mêmes droits (celui-là n'a pas besoin de nos fichiers pour agir).
+# Une clé portable préparée à la main (sans marqueur) n'a ni manifeste ni références : comportement d'avant.
+cc_strict() { cc_est_installation "$ROOT"; }
+
+# Empreinte notée pour $1 (chemin relatif à ROOT) ; vide si aucune.
+cc_ref_get() {
+  local f="$ROOT/.baluchon-refs"
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  awk -v p="$1" '$2==p {print $1; exit}' "$f"
+}
+# Note l'empreinte $2 (64 hexadécimaux) de $1, en remplaçant l'ancienne ; écriture atomique.
+cc_ref_set() {
+  local f="$ROOT/.baluchon-refs" t
+  case "$2" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#2}" = 64 ] || return 1
+  t="$f.$$"
+  { if [ -f "$f" ] && [ ! -L "$f" ]; then awk -v p="$1" '$2!=p' "$f"; fi; printf '%s  %s\n' "$2" "$1"; } > "$t" 2>/dev/null \
+    && mv -f "$t" "$f" || { rm -f "$t"; return 1; }
+}
+cc_ref_drop() {
+  local f="$ROOT/.baluchon-refs" t
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  t="$f.$$"
+  awk -v p="$1" '$2!=p' "$f" > "$t" 2>/dev/null && mv -f "$t" "$f" || { rm -f "$t"; return 1; }
+}
+# Déplace la note de $1 vers $2 (le fichier vient d'être renommé) ; sans note pour $1, $2 n'en a plus.
+cc_ref_move() {
+  local h; h="$(cc_ref_get "$1")"
+  if [ -n "$h" ]; then cc_ref_set "$2" "$h" || true; else cc_ref_drop "$2" || true; fi
+  cc_ref_drop "$1" || true
+}
+# $1 (relatif à ROOT) est-il un fichier ordinaire (pas un lien) qui a EXACTEMENT l'empreinte notée ?
+cc_ref_ok() {
+  local want; want="$(cc_ref_get "$1")"
+  [ -n "$want" ] && [ -f "$ROOT/$1" ] && [ ! -L "$ROOT/$1" ] && [ "$(cc_sha256 "$ROOT/$1")" = "$want" ]
+}
+
 # ─── Releases signées du portable ───────────────────────────────────────
 # Télécharge SHA256SUMS + SHA256SUMS.sig de la dernière release et vérifie la
 # signature (ssh-keygen -Y, présent sur macOS, Linux openssh et Git for Windows).
@@ -136,6 +185,40 @@ cc_fetch_signed_sums() {
 }
 # Empreinte d'un fichier listé dans un SHA256SUMS vérifié. $1 = SHA256SUMS, $2 = nom.
 cc_sum_for() { awk -v n="$2" '$2==n || $2=="*"n {print $1; exit}' "$1"; }
+
+# Le manifeste signé que l'installation a CONSERVÉ (ROOT/.baluchon-sums + .sig), relu sur stdout APRÈS
+# avoir vérifié sa signature avec la clé épinglée dans cette bibliothèque. Les deux fichiers sont d'abord
+# copiés dans un dossier privé et la signature est vérifiée SUR LA COPIE, que l'on relit ensuite : un
+# fichier échangé entre la vérification et la lecture ne passe jamais. Rend 1 (et rien sur stdout) si
+# l'un manque, est un lien, ou n'est pas signé par cette clé.
+# WHY : « Partir » exécute le désinstalleur du dossier qu'il efface, et le menu exécute le noyau ; leur
+# empreinte doit venir d'une liste que personne ne peut avoir réécrite sans la clé privée du produit.
+# Niveau de confiance (à dire en clair) : la clé qui vérifie est celle de CETTE bibliothèque, déjà vérifiée
+# à l'installation ; c'est le même niveau que le menu lui-même.
+cc_sums_signees() {
+  local d sk rc=1
+  sk="$(command -v ssh-keygen 2>/dev/null)"; [ -n "$sk" ] || return 1
+  { [ -f "$ROOT/.baluchon-sums" ] && [ ! -L "$ROOT/.baluchon-sums" ] \
+    && [ -f "$ROOT/.baluchon-sums.sig" ] && [ ! -L "$ROOT/.baluchon-sums.sig" ]; } || return 1
+  d="$(mktemp -d)" || return 1
+  chmod 700 "$d" 2>/dev/null || true
+  if cp "$ROOT/.baluchon-sums" "$d/SHA256SUMS" && cp "$ROOT/.baluchon-sums.sig" "$d/SHA256SUMS.sig" \
+     && printf '%s\n' "$CCP_SIGNER" > "$d/allowed_signers" \
+     && "$sk" -Y verify -f "$d/allowed_signers" -I "$CCP_SIGNER_ID" -n file -s "$d/SHA256SUMS.sig" < "$d/SHA256SUMS" >/dev/null 2>&1; then
+    cat "$d/SHA256SUMS"; rc=0
+  fi
+  rm -rf "$d"
+  return "$rc"
+}
+# Empreinte signée de $1 (nom publié) dans ce manifeste conservé ; vide et code 1 si le manifeste n'est pas
+# authentique ou ne porte pas ce nom.
+cc_sum_signee() {
+  local m h
+  m="$(cc_sums_signees)" || return 1
+  h="$(printf '%s\n' "$m" | awk -v n="$1" '$2==n || $2=="*"n {print $1; exit}')"
+  [ -n "$h" ] || return 1
+  printf '%s' "$h"
+}
 
 # ─── Binaire Claude Code ────────────────────────────────────────────────
 # Empreinte d'une plateforme dans le manifest officiel. Les objets plateforme du
@@ -158,32 +241,80 @@ cc_download_binary() {
   cc_check_sha "$tmp" "$sha" || { rm -f "$tmp"; cc_die "Binaire $plat non vérifié : refusé."; }
   mv -f "$tmp" "$out"; chmod +x "$out" 2>/dev/null || true
   printf '%s' "$ver" > "$ROOT/VERSION"
+  # La référence authentifiée : l'empreinte que le manifeste officiel vient de confirmer (cc_check_sha).
+  cc_ref_set "bin/$plat/$binname" "$sha" || cc_warn "Référence de $binname non notée : elle sera revérifiée au prochain lancement."
   cc_ok "Claude $ver ($plat) vérifié (SHA256 OK)"
 }
 
+# Note, pour « Partir », un dossier de copies d'exécution créé par cc_runnable : ROOT/.baluchon-cache en
+# garde la liste (un chemin absolu par ligne, sans doublon). Sans effet hors installation.
+cc_cache_noter() {
+  local f="$ROOT/.baluchon-cache"
+  cc_strict || return 0
+  [ ! -L "$f" ] || return 0
+  if [ -f "$f" ] && grep -qxF -- "$1" "$f" 2>/dev/null; then return 0; fi
+  printf '%s\n' "$1" >> "$f" 2>/dev/null || true
+}
+
 # Rend exécutable un binaire du portable ; sur une clé exFAT montée noexec,
-# copie unique dans le cache local de la machine. $1 = chemin, $2 = clé de cache.
+# copie unique dans le cache local de la machine. $1 = chemin, $2 = clé de cache, $3 = empreinte attendue.
 # Écrit le chemin exécutable sur stdout.
+# Sur une installation (cc_strict), RIEN n'est exécuté, pas même `--version`, avant que ce qui va l'être
+# ait l'empreinte attendue : le fichier lui-même, et la COPIE en cache (c'est elle qu'on lance, pas
+# l'original). Une empreinte attendue vide refuse (fail-closed). Hors installation, comme avant.
 cc_runnable() {
-  local f="$1" key="$2" cache
+  local f="$1" key="$2" want="${3:-}" cache c strict=0
+  cc_strict && strict=1
+  if [ "$strict" = 1 ]; then cc_check_sha "$f" "$want" || return 1; fi
   chmod +x "$f" 2>/dev/null || true
   if "$f" --version >/dev/null 2>&1; then printf '%s' "$f"; return 0; fi
   cache="${XDG_CACHE_HOME:-$HOME/.cache}/baluchon/$key"
   mkdir -p "$cache" 2>/dev/null || return 1
-  if [ ! -x "$cache/$(basename "$f")" ] || ! cmp -s "$f" "$cache/$(basename "$f")"; then
+  c="$cache/$(basename "$f")"
+  if [ "$strict" = 1 ]; then
+    if [ ! -x "$c" ] || [ "$(cc_sha256 "$c")" != "$want" ]; then
+      cc_info "Clé montée sans exécution : copie de $(basename "$f") en cache local ($cache)"
+      cp "$f" "$cache/" && chmod +x "$c" || return 1
+      [ "$(cc_sha256 "$c")" = "$want" ] || { rm -f "$c"; cc_warn "La copie en cache de $(basename "$f") n'a pas l'empreinte attendue : refus."; return 1; }
+    fi
+    cc_cache_noter "$cache"
+  elif [ ! -x "$c" ] || ! cmp -s "$f" "$c"; then
     cc_info "Clé montée sans exécution : copie de $(basename "$f") en cache local ($cache)"
-    cp "$f" "$cache/" && chmod +x "$cache/$(basename "$f")" || return 1
+    cp "$f" "$cache/" && chmod +x "$c" || return 1
   fi
-  "$cache/$(basename "$f")" --version >/dev/null 2>&1 || return 1
-  printf '%s' "$cache/$(basename "$f")"
+  "$c" --version >/dev/null 2>&1 || return 1
+  printf '%s' "$c"
 }
 
 # Garantit un binaire Claude exécutable. -> BIN
+# Sur une installation, son empreinte doit être celle NOTÉE quand il a été vérifié contre le manifeste
+# officiel (cc_ref_get). Sans note (installation d'avant cette règle), seule autorité : ce manifeste, relu
+# pour la version posée ; une empreinte qui ne correspond à rien fait RETÉLÉCHARGER (vérifié), jamais
+# exécuter. Hors ligne et sans note : refus, dit.
 cc_ensure_binary() {
-  local raw="$ROOT/bin/$PLAT/$BINNAME" ver
+  local raw="$ROOT/bin/$PLAT/$BINNAME" rel="bin/$PLAT/$BINNAME" ver want="" manifest sha
   [ -f "$raw" ] || cc_download_binary "$PLAT" "$BINNAME"
+  if cc_strict; then
+    want="$(cc_ref_get "$rel")"
+    if [ -z "$want" ]; then
+      ver="$(tr -d ' \r\n' < "$ROOT/VERSION" 2>/dev/null)"
+      manifest=""; [ -z "$ver" ] || manifest="$(curl -fsSL -m 20 "$CC_RELEASES/$ver/manifest.json" 2>/dev/null)" || manifest=""
+      sha="$(cc_manifest_sha "$manifest" "$PLAT")"
+      if [ -n "$sha" ] && [ "$(cc_sha256 "$raw")" = "$sha" ]; then
+        cc_ref_set "$rel" "$sha" || true; want="$sha"
+      elif [ -z "$manifest" ]; then
+        cc_die "Le binaire Claude n'a pas pu être authentifié (hors ligne, aucune référence notée) : reconnecte-toi une fois, ou relance l'installation."
+      fi
+    fi
+    # Le fichier est comparé (et seulement alors sondé) par cc_runnable : une seule lecture de ce gros fichier.
+    ver="$(tr -d ' \r\n' < "$ROOT/VERSION" 2>/dev/null || echo unknown)"
+    if [ -n "$want" ] && BIN="$(cc_runnable "$raw" "$ver/$PLAT" "$want" 2>/dev/null)"; then return 0; fi
+    cc_warn "Le binaire Claude ne correspond à aucune empreinte vérifiée : il est retéléchargé et revérifié."
+    rm -f "$raw"; cc_download_binary "$PLAT" "$BINNAME"
+    want="$(cc_ref_get "$rel")"
+  fi
   ver="$(tr -d ' \r\n' < "$ROOT/VERSION" 2>/dev/null || echo unknown)"
-  BIN="$(cc_runnable "$raw" "$ver/$PLAT")" || cc_die "Impossible d'exécuter le binaire claude"
+  BIN="$(cc_runnable "$raw" "$ver/$PLAT" "$want")" || cc_die "Impossible d'exécuter le binaire claude"
 }
 
 # Profil actif : variable CC_PROFILE > fichier ACTIVE > "1"
@@ -213,9 +344,15 @@ JSON
 
 # ─── Interface gum ──────────────────────────────────────────────────────
 cc_ensure_gum() {
-  local g="$ROOT/tools/gum/$PLAT/gum$EXE" os arch tmp b asset
+  local g="$ROOT/tools/gum/$PLAT/gum$EXE" os arch tmp b asset rel="tools/gum/$PLAT/gum$EXE"
   CC_GUM="$g"
-  [ -f "$g" ] && { chmod +x "$g" 2>/dev/null || true; return 0; }
+  if [ -f "$g" ]; then
+    # Sur une installation, gum n'est gardé que s'il a l'empreinte notée quand son archive a été vérifiée
+    # (empreinte épinglée) : un gum remplacé SEUL ne s'exécute jamais, il est retéléchargé.
+    if ! cc_strict || cc_ref_ok "$rel"; then chmod +x "$g" 2>/dev/null || true; return 0; fi
+    rm -f "$g"
+    cc_ref_drop "$rel" || true
+  fi
   case "$CC_OS" in darwin) os=Darwin;; linux) os=Linux;; win32) os=Windows;; *) return 1;; esac
   case "$CC_ARCH" in arm64) arch=arm64;; x64) arch=x86_64;; *) return 1;; esac
   [ "$CC_OS" = win32 ] && arch=x86_64
@@ -226,12 +363,14 @@ cc_ensure_gum() {
     asset="gum_${CC_GUM_VER}_${os}_${arch}.zip"
     curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${CC_GUM_VER}/$asset" -o "$tmp/g.zip" \
       && cc_check_sha "$tmp/g.zip" "$(cc_gum_sha "${os}_${arch}")" \
-      && ( cd "$ROOT/tools/gum/$PLAT" && unzip -o -j "$tmp/g.zip" '*gum.exe' >/dev/null 2>&1 )
+      && ( cd "$ROOT/tools/gum/$PLAT" && unzip -o -j "$tmp/g.zip" '*gum.exe' >/dev/null 2>&1 ) \
+      && cc_ref_set "$rel" "$(cc_sha256 "$g")"
   else
     asset="gum_${CC_GUM_VER}_${os}_${arch}.tar.gz"
     curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${CC_GUM_VER}/$asset" -o "$tmp/g.tgz" \
       && cc_check_sha "$tmp/g.tgz" "$(cc_gum_sha "${os}_${arch}")" \
-      && tar xzf "$tmp/g.tgz" -C "$tmp" && b="$(find "$tmp" -type f -name gum | head -1)" && [ -n "$b" ] && cp "$b" "$g" && chmod +x "$g"
+      && tar xzf "$tmp/g.tgz" -C "$tmp" && b="$(find "$tmp" -type f -name gum | head -1)" && [ -n "$b" ] && cp "$b" "$g" && chmod +x "$g" \
+      && cc_ref_set "$rel" "$(cc_sha256 "$g")"
   fi
   rm -rf "$tmp"
   [ -f "$CC_GUM" ]
@@ -319,14 +458,19 @@ cc_layer_field() {
 # Lit sous la génération déjà résolue (CC_LAYER_DIR) : le manifeste et le noyau d'un même appel
 # viennent TOUJOURS de la même génération.
 cc_layer_core() {
-  local name raw c about why=""
-  CC_LAYER_CORE=""; CC_LAYER_NOTE=""
+  local name raw c about why="" want=""
+  CC_LAYER_CORE=""; CC_LAYER_NOTE=""; CC_CORE_WANT=""
   [ -n "${CC_LAYER_DIR:-}" ] || cc_layer_resolve || return 1
   [ -n "${CC_LAYER_DIR:-}" ] || return 1
   name="$(cc_layer_field name)"; [ -n "$name" ] || name="sans nom"
   raw="$CC_LAYER_DIR/bin/$CORE_PLAT/baluchon-core$EXE"
+  # Sur une installation, le noyau de la couche n'est sondé que si son empreinte a été NOTÉE par celui qui
+  # connaît la clé de la couche (l'amorce de l'atelier, après avoir vérifié les sommes signées de la
+  # couche) : ce fichier-ci ne connaît pas cette clé. Sans note : noyau public, et la ligne dit pourquoi.
+  if cc_strict; then want="$(cc_ref_get "${raw#"$ROOT"/}")"; fi
   if [ ! -f "$raw" ]; then why="pas de noyau pour $CORE_PLAT"
-  elif ! c="$(cc_runnable "$raw" "overlay-core/$CORE_PLAT")"; then why="noyau non exécutable"
+  elif cc_strict && [ -z "$want" ]; then why="noyau non authentifié"
+  elif ! c="$(cc_runnable "$raw" "overlay-core/$CORE_PLAT" "$want")"; then why="noyau non exécutable"
   elif [ "$("$c" --contract 2>/dev/null | tr -d ' \r\n')" != "$CCP_CONTRACT" ]; then why="contrat périmé"
   else
     about="$("$c" about --json 2>/dev/null | tr -d ' \r\n')"
@@ -341,35 +485,81 @@ cc_layer_core() {
     cc_log "$CC_LAYER_NOTE"
     return 1
   fi
-  CC_LAYER_CORE="$c"
+  CC_LAYER_CORE="$c"; CC_CORE_WANT="$want"
 }
 
 # Appelle un crochet de la couche (`update` ou `uninstall`) s'il existe. Un échec est dit, jamais
 # fatal : la mise à jour du public a déjà réussi et la couche garde sa version précédente.
 cc_layer_hook() {
-  local h="$ROOT/overlay/hooks/$1" rc=0
+  local h="$ROOT/overlay/hooks/$1" rc=0 priv="" want
   [ -f "$h" ] || return 0
+  # L'amorce de l'atelier, seule à connaître la clé de la couche, pose BALUCHON_SANS_CROCHET=1 quand elle n'a
+  # pas pu authentifier le crochet installé : il n'est alors pas exécuté (elle repose elle-même la couche).
+  if [ "${BALUCHON_SANS_CROCHET:-}" = 1 ]; then cc_info "Couche : crochet « $1 » non exécuté (non authentifié)."; return 0; fi
+  # Sur une installation, un crochet ne s'exécute que s'il a l'empreinte NOTÉE par celui qui connaît la clé de la
+  # couche (l'amorce, après avoir vérifié les sommes signées de la couche) : ce fichier-ci ne la connaît pas, mais
+  # il sait refuser un crochet remplacé SEUL. Sans note : non exécuté, dit, jamais fatal.
+  # Ce qui est exécuté est une COPIE privée hachée après copie (rien ne peut plus l'échanger entre le contrôle et
+  # l'exécution) ; le crochet se recopie lui-même de toute façon (« cp $0 ») : la copie est donc sans effet sur lui.
+  if cc_strict; then
+    want="$(cc_ref_get "overlay/hooks/$1")"
+    priv="$(mktemp -d)" || return 0
+    chmod 700 "$priv" 2>/dev/null || true
+    if [ -z "$want" ] || [ -L "$h" ] || ! cp "$h" "$priv/hook" || [ "$(cc_sha256 "$priv/hook")" != "$want" ]; then
+      rm -rf "$priv"
+      cc_warn "Couche : le crochet « $1 » n'a pas d'empreinte authentifiée : non exécuté. Relance le lien d'installation de l'atelier pour le revérifier."
+      return 0
+    fi
+    h="$priv/hook"
+  fi
   cc_info "Couche : crochet « $1 »…"
   ( BALUCHON_ROOT="$ROOT" BALUCHON_CORE_PLAT="${CORE_PLAT:-}" BALUCHON_EXE="${EXE:-}" bash "$h" ) || rc=$?
+  [ -z "$priv" ] || rm -rf "$priv"
   [ "$rc" = 0 ] || { cc_warn "Le crochet « $1 » de la couche a échoué (code $rc)."; return 1; }
 }
 
 cc_ensure_core() {
-  local raw="$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" c
-  CORE=""; CC_LAYER_NOTE=""
+  local raw="$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" c want=""
+  CORE=""; CC_LAYER_NOTE=""; CC_CORE_WANT=""
   # La génération est résolue ICI, une fois : le pointeur n'est plus relu pendant ce choix.
   cc_layer_resolve || true
   if [ -n "${CC_LAYER_DIR:-}" ] && cc_layer_core; then CORE="$CC_LAYER_CORE"; return 0; fi
   [ -f "$raw" ] || cc_download_core || { cc_log "baluchon-core indisponible (téléchargement)"; return 1; }
-  c="$(cc_runnable "$raw" "core/$CORE_PLAT")" || { cc_log "baluchon-core non exécutable"; return 1; }
+  # Le noyau public d'une installation : empreinte du manifeste SIGNÉ conservé (cc_sum_signee), jamais la
+  # simple présence du fichier. Manifeste absent ou non authentique : pas de noyau (mode dégradé, dit au journal).
+  if cc_strict; then
+    want="$(cc_sum_signee "baluchon-core-$CORE_PLAT$EXE")" || want=""
+    [ -n "$want" ] || { cc_log "baluchon-core non authentifié (manifeste signé absent ou invalide) : mode dégradé"; return 1; }
+  fi
+  c="$(cc_runnable "$raw" "core/$CORE_PLAT" "$want")" || { cc_log "baluchon-core non exécutable ou empreinte invalide"; return 1; }
   if [ "$("$c" --contract 2>/dev/null | tr -d ' \r\n')" != "$CCP_CONTRACT" ]; then
     cc_log "baluchon-core : contrat inattendu (attendu $CCP_CONTRACT)"; return 1
   fi
-  CORE="$c"
+  CORE="$c"; CC_CORE_WANT="$want"
 }
 # Appelle le noyau avec la racine du portable, Ctrl+C rendu à l'enfant (le
 # wizard ignore SIGINT pour survivre à un Ctrl+C dans Claude).
-ccp_core() { [ -n "${CORE:-}" ] || return 127; ( trap - INT; "$CORE" --root "$ROOT" "$@" ); }
+# Sur une installation, l'empreinte du noyau est relue AVANT chaque appel (CC_CORE_WANT, posée quand cc_ensure_core
+# l'a authentifié) : un noyau remplacé pendant que le menu reste ouvert n'est jamais exécuté. Une lecture
+# SHA-256 de quelques Mo ; reste la fenêtre entre cette lecture et l'exécution (voir TECHNICAL.md).
+ccp_core() {
+  [ -n "${CORE:-}" ] || return 127
+  if [ -n "${CC_CORE_WANT:-}" ] && [ "$(cc_sha256 "$CORE")" != "$CC_CORE_WANT" ]; then
+    cc_warn "Le noyau a changé depuis son contrôle : non exécuté."; return 126
+  fi
+  ( trap - INT; "$CORE" --root "$ROOT" "$@" )
+}
+
+# Le binaire Claude (BIN) a-t-il TOUJOURS l'empreinte notée quand il a été vérifié ? À jouer juste avant de le
+# lancer : le menu reste ouvert longtemps, et le binaire a pu être remplacé entre-temps. Hors installation :
+# rien à comparer, 0. Même fenêtre résiduelle que ccp_core.
+cc_bin_verifie() {
+  local want
+  cc_strict || return 0
+  want="$(cc_ref_get "bin/$PLAT/$BINNAME")"
+  [ -n "$want" ] && [ -n "${BIN:-}" ] && [ "$(cc_sha256 "$BIN")" = "$want" ] \
+    || { cc_warn "Le binaire Claude a changé depuis son contrôle : non lancé. Relance le menu pour le revérifier."; return 1; }
+}
 
 # ─── Mises à jour ───────────────────────────────────────────────────────
 # Dernière version stable de Claude, relevée au plus une fois par jour (bandeau
@@ -406,13 +596,16 @@ cc_update() {
     dst="$ROOT/bin/$plat/$binname"; tmp="$ROOT/bin/$plat/.$binname.new"
     cc_info "MAJ $plat ..."
     if curl -fsSL "$CC_RELEASES/$ver/$plat/$binname" -o "$tmp" && cc_check_sha "$tmp" "$sha"; then
-      [ -f "$dst" ] && mv -f "$dst" "$dst.prev" && printf '%s' "${old:-?}" > "$ROOT/bin/$plat/.prev-version"
+      [ -f "$dst" ] && mv -f "$dst" "$dst.prev" && printf '%s' "${old:-?}" > "$ROOT/bin/$plat/.prev-version" \
+        && cc_ref_move "bin/$plat/$binname" "bin/$plat/$binname.prev"
       if mv -f "$tmp" "$dst"; then
         chmod +x "$dst" 2>/dev/null || true; cc_ok "$plat à jour ($ver)"
+        # L'empreinte que le manifeste officiel vient de confirmer devient la référence du nouveau binaire.
+        cc_ref_set "bin/$plat/$binname" "$sha" || cc_warn "Référence de $plat non notée : elle sera revérifiée au prochain lancement."
         [ "$plat" = "$PLAT" ] && here_ok=1
       else
         # Remise en place de l'ancien binaire : jamais de plateforme sans claude.
-        [ -f "$dst.prev" ] && [ ! -f "$dst" ] && mv -f "$dst.prev" "$dst"
+        if [ -f "$dst.prev" ] && [ ! -f "$dst" ] && mv -f "$dst.prev" "$dst"; then cc_ref_move "bin/$plat/$binname.prev" "bin/$plat/$binname"; fi
         rm -f "$tmp"; cc_warn "$plat : installation impossible, ancienne version conservée."
       fi
     else rm -f "$tmp"; cc_warn "$plat : échec ou empreinte invalide, ancienne version conservée."; fi
@@ -428,10 +621,14 @@ cc_update() {
 
 # Revient à la version précédente de Claude (celle gardée par cc_update).
 cc_rollback() {
-  local dst="$ROOT/bin/$PLAT/$BINNAME" prev
+  local dst="$ROOT/bin/$PLAT/$BINNAME" prev ra rb rel="bin/$PLAT/$BINNAME"
   [ -f "$dst.prev" ] || { cc_warn "Aucune version précédente gardée."; return 1; }
   prev="$(tr -d ' \r\n' < "$ROOT/bin/$PLAT/.prev-version" 2>/dev/null)"
+  ra="$(cc_ref_get "$rel")"; rb="$(cc_ref_get "$rel.prev")"
   mv -f "$dst" "$dst.rollback-tmp" && mv -f "$dst.prev" "$dst" && mv -f "$dst.rollback-tmp" "$dst.prev"
+  # Les références suivent les fichiers : chacune reste attachée au binaire qu'elle a authentifié.
+  if [ -n "$rb" ]; then cc_ref_set "$rel" "$rb" || true; else cc_ref_drop "$rel" || true; fi
+  if [ -n "$ra" ]; then cc_ref_set "$rel.prev" "$ra" || true; else cc_ref_drop "$rel.prev" || true; fi
   [ -n "$prev" ] && { printf '%s' "$(tr -d ' \r\n' < "$ROOT/VERSION")" > "$ROOT/bin/$PLAT/.prev-version"; printf '%s' "$prev" > "$ROOT/VERSION"; }
   cc_ok "Claude revenu à ${prev:-la version précédente}"
 }
@@ -460,13 +657,39 @@ cc_update_portable() {
   chmod +x "$ROOT/Claude.command" 2>/dev/null || true
   # Le relevé « cette installation est celle de cette release » n'est posé que si TOUT a été remplacé :
   # un fichier manqué ferait croire à install.sh que rien n'est à refaire.
-  if [ "$fail" = 0 ] && [ "$ok" -gt 0 ] && cc_est_installation "$ROOT"; then cc_release_noter "$w/SHA256SUMS" || true; fi
+  if [ "$fail" = 0 ] && [ "$ok" -gt 0 ] && cc_est_installation "$ROOT"; then cc_release_noter "$w/SHA256SUMS" "$w/SHA256SUMS.sig" || true; fi
   rm -rf "$w"
   cc_layer_hook update || true
   [ "$ok" -gt 0 ]
 }
 
 # ─── Effacement ─────────────────────────────────────────────────────────
+# La racine qu'on s'apprête à vider est-elle raisonnable ? À jouer AVANT toute suppression (revue Codex,
+# 2e passe : avec `ROOT/config` lié vers ~/Documents, `rm -rf "$ROOT"/config/*` effaçait les documents ; les
+# gardes d'uninstall.sh arrivaient trop tard, cc_wipe passant avant). Juge le chemin PHYSIQUE (liens, « . » et
+# « .. » résolus) et pose CC_ROOT_REAL, le seul chemin qu'on efface ensuite : absolu, un dossier, ni « / », ni le
+# domicile, ni un parent du domicile et, sur une installation (où le propriétaire d'un fichier veut dire
+# quelque chose), propriétaire = cet utilisateur. Une racine qui est elle-même un lien (installation rangée
+# ailleurs puis liée) est légitime : on efface sa CIBLE, jamais le lien. Pas de contrôle de propriétaire sur une
+# clé exFAT/FAT, qui n'en a pas : le refuser laisserait des sessions sur un poste invité.
+cc_racine_sure() {
+  local real home_real own
+  CC_ROOT_REAL=""
+  case "${ROOT:-}" in /*) ;; *) return 1 ;; esac
+  real="$(cd -P -- "$ROOT" 2>/dev/null && pwd -P)" || return 1
+  [ -n "$real" ] && [ "$real" != "/" ] || return 1
+  home_real="$(cd -P -- "$HOME" 2>/dev/null && pwd -P)" || home_real=""
+  if [ -n "$home_real" ]; then
+    [ "$real" != "$home_real" ] || return 1
+    case "$home_real/" in "${real%/}/"*) return 1 ;; esac
+  fi
+  if cc_strict; then
+    own="$(find "$real" -maxdepth 0 -user "$(id -u)" 2>/dev/null)"
+    [ -n "$own" ] || return 1
+  fi
+  CC_ROOT_REAL="$real"
+}
+
 # Efface les sessions de CE portable : Trousseau macOS (services suffixés
 # seulement, jamais la session Claude Code normale de la machine) ET identifiants
 # en fichier (seul magasin sous Windows/Linux). Passe par le noyau ; le repli
@@ -476,13 +699,22 @@ cc_update_portable() {
 # encore vivant pourrait réécrire des identifiants (code 11 du noyau) ; 1 = échec.
 cc_purge_sessions() {
   local core_rc=0
+  # Jamais sur une racine douteuse, ni à travers un lien : le noyau et le repli ci-dessous suivraient
+  # `config` où qu'il mène (voir cc_racine_sure et cc_wipe).
+  cc_racine_sure || { cc_warn "Racine d'effacement refusée ($ROOT) : rien n'est effacé."; return 1; }
+  if [ -L "$ROOT/config" ]; then cc_warn "config est un lien symbolique : il n'est jamais suivi, rien n'est effacé."; return 1; fi
   ccp_core accounts purge >/dev/null 2>&1 || core_rc=$?
   case "$core_rc" in 0) return 0 ;; 11) return 2 ;; esac
-  local d cfg f rc=0
+  local d cfg f rc=0 sr
   for d in "$ROOT"/config/*/; do
     [ -d "$d" ] || continue; cfg="${d%/}"
+    # Un profil qui est un lien mène hors de la racine : on ne le suit pas, et on le dit par le code retour.
+    if [ -L "$cfg" ]; then cc_warn "config/${cfg##*/} est un lien symbolique : non suivi, ses sessions ne sont pas effacées."; rc=1; continue; fi
     if [ "${CC_OS:-}" = darwin ]; then
-      security delete-generic-password -s "Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)" >/dev/null 2>&1 || true
+      # 0 = supprimé, 44 = l'item n'existait pas : les deux disent « il n'y en a plus ». Toute autre
+      # réponse (Trousseau verrouillé, accès refusé, outil absent) n'établit RIEN : échec.
+      security delete-generic-password -s "Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)" >/dev/null 2>&1; sr=$?
+      case "$sr" in 0|44) ;; *) rc=1 ;; esac
     fi
     # Même liste que core/src/purge.rs : journal, sa réservation (peut contenir
     # des jetons neufs) et les temporaires d'écriture atomique.
@@ -509,8 +741,15 @@ cc_purge_keychain() { cc_purge_sessions; }
 # hôte oublier ; sans lui, une nouvelle tentative répondrait « aucun Mac configuré » et réussirait
 # sans rien effacer. Il ne contient aucun secret (hôte, utilisateur, options).
 cc_wipe() {
-  local prc=0 frc=0 sortie="" f h autres
+  local prc=0 frc=0 sortie="" f h autres cfg liens="" lrc=0 lien_cfg=0
   CC_WIPE_NOTE=""
+  # Avant toute suppression : la racine est jugée (cc_racine_sure), et `config` n'est jamais suivi s'il est un lien.
+  if ! cc_racine_sure; then
+    CC_WIPE_NOTE="La racine « $ROOT » n'est pas un dossier que Baluchon accepte d'effacer (relative, « / », le domicile ou son parent, ou propriétaire étranger) : rien n'a été effacé."
+    return 1
+  fi
+  cfg="$CC_ROOT_REAL/config"
+  [ ! -L "$ROOT/config" ] && [ ! -L "$cfg" ] || lien_cfg=1
   cc_purge_keychain || prc=$?
   # Hôtes d'accès que l'amorce a signalés parce que leurs jetons pouvaient rester (.baluchon-acces) :
   # ils ne sont pas dans remote.conf, donc le `forget-access` nu ne les verrait jamais.
@@ -524,14 +763,30 @@ cc_wipe() {
     frc=127; sortie="noyau indisponible : les jetons de ~/.cloudflared n'ont pas pu être cherchés."
   fi
   # Tout est effacé : plus rien à surveiller. Sur un échec, le fichier reste, pour le prochain essai.
-  [ "$frc" != 0 ] || rm -f "$ROOT/.baluchon-acces" 2>/dev/null || true
-  for f in "$ROOT"/config/*; do
-    [ -e "$f" ] || [ -L "$f" ] || continue
-    if [ "$frc" != 0 ] && [ "${f##*/}" = remote.conf ]; then continue; fi
-    rm -rf "$f" 2>/dev/null || true
-  done
-  rm -f "$ROOT"/ACTIVE 2>/dev/null || true
-  if [ "$prc" != 0 ] && [ "$prc" != 2 ]; then
+  [ "$frc" != 0 ] || rm -f "$CC_ROOT_REAL/.baluchon-acces" 2>/dev/null || true
+  # Les suppressions partent d'un dossier OUVERT et contrôlé : on entre dans config (`cd -P`), on vérifie que
+  # le dossier où l'on est est bien « <racine physique>/config », puis on supprime par des noms RELATIFS. Un
+  # lien échangé après coup ne mène donc plus nulle part ; un profil qui est lui-même un lien est laissé en
+  # place, DIT, et jamais suivi.
+  if [ "$lien_cfg" = 1 ]; then
+    prc=1
+    CC_WIPE_NOTE="config est un lien symbolique : il n'est jamais suivi, rien n'y a été effacé."
+  elif [ -d "$cfg" ]; then
+    liens="$( cd -P -- "$cfg" 2>/dev/null && [ "$(pwd -P)" = "$cfg" ] || exit 3
+              for f in ./*; do
+                [ -e "$f" ] || [ -L "$f" ] || continue
+                if [ "$frc" != 0 ] && [ "${f#./}" = remote.conf ]; then continue; fi
+                if [ -L "$f" ]; then printf '%s\n' "${f#./}"; continue; fi
+                rm -rf -- "$f" 2>/dev/null || true
+              done )" || lrc=$?
+    if [ "$lrc" = 3 ]; then
+      prc=1; CC_WIPE_NOTE="config n'est plus le dossier jugé (remplacé pendant l'effacement) : rien n'y a été effacé."
+    elif [ -n "$liens" ]; then
+      prc=1; CC_WIPE_NOTE="Ces entrées de config sont des liens symboliques : jamais suivis, leur contenu n'a PAS été effacé :"$'\n'"$(printf '%s\n' "$liens" | sed 's/^/  - config\//' | head -n 12)"
+    fi
+  fi
+  rm -f "$CC_ROOT_REAL"/ACTIVE 2>/dev/null || true
+  if [ "$prc" != 0 ] && [ "$prc" != 2 ] && [ -z "$CC_WIPE_NOTE" ]; then
     CC_WIPE_NOTE="Des identifiants Claude n'ont pas pu être effacés (Trousseau ou fichiers de $ROOT/config)."
   fi
   if [ "$frc" != 0 ]; then
@@ -569,27 +824,35 @@ cc_release_tag() {
 }
 
 # Note, EN DERNIER (après une installation ou une mise à jour complète), quelle release est posée : le
-# fichier .baluchon-release porte l'empreinte du SHA256SUMS dont la signature vient d'être vérifiée.
+# fichier .baluchon-release porte l'empreinte du SHA256SUMS dont la signature vient d'être vérifiée, et
+# l'installation CONSERVE ce manifeste signé (.baluchon-sums + .baluchon-sums.sig) : c'est lui qui permet,
+# plus tard, de reconnaître chaque exécutable avant de le lancer, sans retélécharger (cc_sums_signees).
 # WHY l'empreinte et non un numéro de version : aucune version à deviner, et deux releases qui diffèrent
-# d'un seul octet de n'importe quel actif ne se confondent jamais. $1 = SHA256SUMS authentifié.
+# d'un seul octet de n'importe quel actif ne se confondent jamais.
+# $1 = SHA256SUMS authentifié, $2 = sa signature (défaut : $1.sig). Sans signature, rien n'est noté : une
+# installation dont on ne peut pas prouver la liste n'est jamais « à jour ».
 cc_release_noter() {
-  local sums="$1" h tag tmp
+  local sums="$1" sig="${2:-$1.sig}" h tag tmp
   h="$(cc_sha256 "$sums")"; [ -n "$h" ] || return 1
+  [ -f "$sig" ] || return 1
+  tmp="$ROOT/.baluchon-sums.$$"
+  { cp "$sums" "$tmp" && mv -f "$tmp" "$ROOT/.baluchon-sums"; } || { rm -f "$tmp"; return 1; }
+  { cp "$sig" "$tmp" && mv -f "$tmp" "$ROOT/.baluchon-sums.sig"; } || { rm -f "$tmp"; return 1; }
   tag="$(cc_release_tag | tr -c 'A-Za-z0-9._+-' '_')"
   tmp="$ROOT/.baluchon-release.$$"
   printf 'baluchon-release 1\nsums %s\ntag %s\n' "$h" "$tag" > "$tmp" && mv -f "$tmp" "$ROOT/.baluchon-release"
 }
 
-# Cette installation est-elle EXACTEMENT celle de la release dont $1 (SHA256SUMS authentifié) est la
-# liste ? Oui seulement si le marqueur d'installation est valide, si le relevé .baluchon-release porte
-# l'empreinte de $1, si chaque fichier posé (menu, bibliothèque, désinstalleur, noyau) a l'empreinte
-# que la release signe, et si le binaire Claude, sa version et gum sont là. Fail-closed : au moindre doute,
-# non, et l'installeur refait tout (il ne perd rien à refaire). Suppose cc_detect_platform déjà joué.
-cc_release_a_jour() {
-  local sums="$1" st="$ROOT/.baluchon-release" paire nom f want
+# Tout ce que cette installation EXÉCUTE ou source a-t-il l'empreinte d'une liste authentifiée ? $1 = SHA256SUMS
+# dont la signature a été vérifiée (frais, ou relu de cc_sums_signees). Vérifie le menu, la bibliothèque, le
+# désinstalleur, le noyau public (empreintes du manifeste), puis Claude et gum (références notées quand
+# leur empreinte a été vérifiée à la source : cc_ref_ok), chacun fichier ordinaire et non lien. Rien n'est
+# exécuté ici. C'est la porte que l'amorce, le menu et « Partir » passent AVANT de lancer quoi que ce soit.
+# Suppose cc_detect_platform déjà joué. Fail-closed : au moindre doute, non.
+cc_installation_authentique() {
+  local sums="$1" paire nom f want
   cc_est_installation "$ROOT" || return 1
-  [ -f "$st" ] && [ ! -L "$st" ] && [ "$(head -n 1 "$st" 2>/dev/null)" = "baluchon-release 1" ] || return 1
-  [ "$(awk '$1=="sums"{print $2; exit}' "$st" 2>/dev/null)" = "$(cc_sha256 "$sums")" ] || return 1
+  [ -f "$sums" ] || return 1
   for paire in "Claude.command:Claude.command" "common.sh:lib/common.sh" "uninstall.sh:uninstall.sh" \
                "baluchon-core-$CORE_PLAT$EXE:bin/$CORE_PLAT/baluchon-core$EXE"; do
     nom="${paire%%:*}"; f="$ROOT/${paire#*:}"
@@ -599,10 +862,30 @@ cc_release_a_jour() {
       [ "$nom" = uninstall.sh ] && continue
       return 1
     fi
-    [ -f "$f" ] && [ "$(cc_sha256 "$f")" = "$want" ] || return 1
+    [ -f "$f" ] && [ ! -L "$f" ] && [ "$(cc_sha256 "$f")" = "$want" ] || return 1
   done
-  # Le binaire Claude, sa version et l'interface (sans gum, le menu n'existe pas : mieux vaut retenter).
-  [ -f "$ROOT/bin/$PLAT/$BINNAME" ] && [ -s "$ROOT/VERSION" ] && [ -f "$ROOT/tools/gum/$PLAT/gum$EXE" ]
+  # Claude et sa version ; gum seulement s'il est là (sans lui, le menu se contente de lancer le compte par
+  # défaut), mais ALORS avec l'empreinte notée : jamais un gum qu'on n'a pas vérifié.
+  [ -s "$ROOT/VERSION" ] && cc_ref_ok "bin/$PLAT/$BINNAME" || return 1
+  if [ -e "$ROOT/tools/gum/$PLAT/gum$EXE" ] || [ -L "$ROOT/tools/gum/$PLAT/gum$EXE" ]; then
+    cc_ref_ok "tools/gum/$PLAT/gum$EXE" || return 1
+  fi
+}
+
+# Cette installation est-elle EXACTEMENT celle de la release dont $1 (SHA256SUMS authentifié) est la
+# liste ? Oui seulement si le marqueur d'installation est valide, si le relevé .baluchon-release et le manifeste
+# conservé portent l'empreinte de $1, et si cc_installation_authentique l'accepte. Fail-closed : au moindre
+# doute, non, et l'installeur refait tout (il ne perd rien à refaire).
+cc_release_a_jour() {
+  local sums="$1" st="$ROOT/.baluchon-release" h
+  cc_est_installation "$ROOT" || return 1
+  [ -f "$st" ] && [ ! -L "$st" ] && [ "$(head -n 1 "$st" 2>/dev/null)" = "baluchon-release 1" ] || return 1
+  h="$(cc_sha256 "$sums")"; [ -n "$h" ] || return 1
+  [ "$(awk '$1=="sums"{print $2; exit}' "$st" 2>/dev/null)" = "$h" ] || return 1
+  [ -f "$ROOT/.baluchon-sums" ] && [ ! -L "$ROOT/.baluchon-sums" ] && [ "$(cc_sha256 "$ROOT/.baluchon-sums")" = "$h" ] || return 1
+  # Sans gum, le menu n'existe pas : mieux vaut retenter l'installation.
+  [ -f "$ROOT/tools/gum/$PLAT/gum$EXE" ] || return 1
+  cc_installation_authentique "$sums"
 }
 
 # Nom d'hôte DNS sûr (même règle que le noyau : jamais de tiret ni de point en tête, rien hors
@@ -660,9 +943,27 @@ cc_commande_menu() {
 # standard est le script lui-même ; le menu doit lire le clavier. Sans terminal (cron, SSH sans -t,
 # agent), il n'y a rien à ouvrir : on dit la commande à taper, et ce n'est pas une erreur.
 # CC_TTY remplace /dev/tty (essais : un fichier).
+# Sur une installation, le menu n'est lancé qu'APRÈS cc_installation_authentique : $2 = SHA256SUMS dont la
+# signature vient d'être vérifiée (install.sh, amorce) ; sans $2, le manifeste signé que l'installation a
+# conservé. Refus (code 1, dit) sinon : « Claude.command » ne s'exécute jamais sur la foi de son seul chemin.
+# Il reste la fenêtre entre cette vérification et l'exécution du menu par le système, et le menu source
+# lui-même lib/common.sh : même niveau de confiance que de taper `baluchon` (voir TECHNICAL.md, « Ce qui
+# reste hors de portée »).
 cc_open_menu() {
-  local cmd="$1" tty="${CC_TTY:-/dev/tty}" rc=0
+  local cmd="$1" sums="${2:-}" tty="${CC_TTY:-/dev/tty}" rc=0 priv="" ok=1
   [ -x "$cmd" ] || { cc_warn "Menu introuvable ($cmd)."; return 1; }
+  if cc_strict; then
+    if [ -z "$sums" ]; then
+      priv="$(mktemp -d)" || return 1
+      chmod 700 "$priv" 2>/dev/null || true
+      if cc_sums_signees > "$priv/SHA256SUMS" 2>/dev/null; then sums="$priv/SHA256SUMS"; else ok=0; fi
+    fi
+    if [ "$ok" = 1 ]; then
+      if [ "$cmd" != "$ROOT/Claude.command" ] || ! cc_installation_authentique "$sums"; then ok=0; fi
+    fi
+    [ -z "$priv" ] || rm -rf "$priv"
+    [ "$ok" = 1 ] || { cc_warn "Cette installation ne correspond plus à la release signée : le menu n'est pas ouvert. Relance le lien d'installation (il remet tout d'équerre)."; return 1; }
+  fi
   if [ -r "$tty" ] && [ -w "$tty" ] && ( : < "$tty" ) 2>/dev/null; then
     # shellcheck disable=SC2094  # le terminal est lu ET écrit : c'est le but
     BALUCHON_DEPUIS_LIEN=1 "$cmd" < "$tty" >> "$tty" 2>&1 || rc=$?
@@ -673,11 +974,30 @@ cc_open_menu() {
 }
 
 # ── Partir : tout effacer et désinstaller ──────────────────────────────────────────────────
+# Base des copies d'exécution que cc_runnable range quand la clé est montée sans exécution.
+cc_cache_base() { printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/baluchon"; }
+
+# Dossiers de cache que CETTE installation a notés (.baluchon-cache), un par ligne, retenus seulement s'ils sont
+# sûrs : absolus, strictement SOUS la base, sans « .. » ni retour chariot. Une ligne douteuse est ignorée,
+# jamais suivie : ce fichier est écrit avec les droits de l'utilisateur et ne doit pas pouvoir désigner
+# ~/Documents. (uninstall.sh refait la même vérification, il est autonome.)
+cc_cache_liste() {
+  local f="$ROOT/.baluchon-cache" base p
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  base="$(cc_cache_base)"
+  while IFS= read -r p || [ -n "$p" ]; do
+    case "$p" in "$base"/?*) ;; *) continue ;; esac
+    case "$p" in *..*|*$'\r'*) continue ;; esac
+    printf '%s\n' "$p"
+  done < "$f"
+}
+
 # Relevé de ce qu'il faudra chercher, fait AVANT d'effacer : une fois le dossier parti, plus rien ne dit
 # quel item du Trousseau ni quel hôte regarder. Pose CC_DEP_DIRS (le chemin du dossier tel que le menu le
 # connaît, et son chemin canonique s'il diffère : un lien mène au même dossier), CC_DEP_SERVICES (items
 # Trousseau macOS : un par config/<profil>, pour chacun des deux chemins, puisque Claude suffixe le nom du
-# service d'après le chemin qu'on lui donne) et CC_DEP_HOTES. Une valeur par ligne.
+# service d'après le chemin qu'on lui donne), CC_DEP_HOTES et CC_DEP_CACHES (copies d'exécution notées
+# par cette installation). Une valeur par ligne.
 cc_depart_releve() {
   local real d cfg base
   CC_DEP_DIRS="$ROOT"
@@ -695,6 +1015,7 @@ cc_depart_releve() {
     done
   fi
   CC_DEP_HOTES="$(cc_acces_hotes)"
+  CC_DEP_CACHES="$(cc_cache_liste)"
 }
 
 # Relit le DISQUE (jamais le code retour d'un effacement) et dit ce qui reste de ce que cc_depart_releve
@@ -703,7 +1024,7 @@ cc_depart_releve() {
 # CC_DEPART_RESTE (une ligne par reste) ; rend 0 si rien ne reste, 1 sinon. N'écrit nulle part : un
 # journal recréé ici serait lui-même un reste.
 cc_depart_verifie() {
-  local p n f s h nom re lignes="" cf="$HOME/.cloudflared" nl=$'\n'
+  local p n f s h nom re lignes="" cf="$HOME/.cloudflared" nl=$'\n' sr nonverif
   while IFS= read -r p; do
     [ -n "$p" ] || continue
     if [ -e "$p" ] || [ -L "$p" ]; then lignes="${lignes}Le dossier $p est encore là.$nl"; fi
@@ -716,12 +1037,27 @@ cc_depart_verifie() {
       if grep -qF "$p/Claude.command" "$f" 2>/dev/null; then lignes="${lignes}La commande $f lance encore Baluchon.$nl"; break; fi
     done <<< "$CC_DEP_DIRS"
   done
-  if [ "${CC_OS:-}" = darwin ] && command -v security >/dev/null 2>&1; then
+  if [ "${CC_OS:-}" = darwin ] && [ -n "$CC_DEP_SERVICES" ]; then
+    # 0 = l'item est là ; 44 = il n'existe pas. Toute autre réponse (Trousseau verrouillé, accès refusé, outil
+    # absent) n'établit PAS l'absence : jamais « Rien ne reste » sur un silence.
+    nonverif=""
+    if ! command -v security >/dev/null 2>&1; then nonverif="outil « security » absent"; fi
     while IFS= read -r s; do
       [ -n "$s" ] || continue
-      if security find-generic-password -s "$s" >/dev/null 2>&1; then lignes="${lignes}Trousseau : l'item « $s » est encore là.$nl"; fi
+      [ -z "$nonverif" ] || break
+      sr=0; security find-generic-password -s "$s" >/dev/null 2>&1 || sr=$?
+      case "$sr" in
+        0)  lignes="${lignes}Trousseau : l'item « $s » est encore là.$nl" ;;
+        44) ;;
+        *)  nonverif="code $sr" ;;
+      esac
     done <<< "$CC_DEP_SERVICES"
+    if [ -n "$nonverif" ]; then lignes="${lignes}Trousseau : sessions non vérifiées ($nonverif ; Trousseau verrouillé ?).$nl"; fi
   fi
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ -e "$p" ] || [ -L "$p" ]; then lignes="${lignes}Cache d'exécution : $p est encore là.$nl"; fi
+  done <<< "${CC_DEP_CACHES:-}"
   if [ -n "$CC_DEP_HOTES" ] && [ -d "$cf" ]; then
     for f in "$cf"/*; do
       { [ -e "$f" ] || [ -L "$f" ]; } || continue
@@ -742,26 +1078,35 @@ cc_depart_verifie() {
 
 # Efface tout ce que Baluchon a posé sur cet ordinateur : sessions et jetons (cc_wipe), puis le dossier et
 # les commandes (uninstall.sh, l'UNIQUE endroit où vivent les gardes du chemin à effacer : marqueur,
-# domicile, ancêtres, identité du dossier). On l'exécute depuis une COPIE vérifiée (cmp + bash -n) dans un
-# dossier privé : le dossier qu'on efface contient le script, et un script bash lu pendant qu'on supprime
-# son fichier est un piège. Sans interface, sans question : la confirmation est celle du menu.
+# domicile, ancêtres, identité du dossier). On l'exécute depuis une COPIE dans un dossier privé : le dossier
+# qu'on efface contient le script, et un script bash lu pendant qu'on supprime son fichier est un piège.
+# Cette copie est AUTHENTIFIÉE : son empreinte est comparée à celle que le manifeste signé de l'installation
+# (.baluchon-sums + .sig, signature vérifiée avec la clé épinglée dans cette bibliothèque) donne pour
+# uninstall.sh ; la copie est faite dans le dossier privé AVANT le calcul, c'est elle qui est hachée et elle
+# qui sera exécutée (un fichier modifié pendant que le menu reste ouvert ne passe plus ; bash -n ne prouvait
+# que la syntaxe). Niveau de confiance, dit sans fard : la clé qui vérifie est celle de CETTE bibliothèque,
+# déjà vérifiée à l'installation ; c'est le même niveau que le menu lui-même (qui est cette bibliothèque).
+# Sans interface, sans question : la confirmation est celle du menu.
 # Code de sortie (le détail de ce qui reste est dans CC_DEPART_RESTE et CC_DEPART_NOTE) :
-#   0 = rien ne reste, relu sur le disque ; 14 = rien n'a été fait (désinstalleur absent ou altéré) ;
+#   0 = rien ne reste, relu sur le disque ; 14 = rien n'a été fait (désinstalleur absent ou altéré, ou
+#   manifeste signé absent/invalide) ;
 #   2, 10, 11, 12 = codes d'uninstall.sh (refusé, jetons Access, purge incomplète, dossier non supprimé) ;
 #   2 aussi si cc_wipe a vu une session Claude encore ouverte ; 1, 10 = codes de cc_wipe quand le
 #   désinstalleur n'a pas pu les corriger ; 13 = il reste quelque chose que personne n'avait signalé.
 # AUCUN cc_log ici ni après : il recréerait ROOT/logs dans le dossier qu'on vient d'effacer.
 cc_depart() {
-  local un="$ROOT/uninstall.sh" tmpd copie wrc=0 urc=0 code=0 reste=0
+  local un="$ROOT/uninstall.sh" tmpd copie want wrc=0 urc=0 code=0 reste=0
   CC_DEPART_NOTE=""; CC_DEPART_RESTE=""
   cc_est_installation "$ROOT" && [ -f "$un" ] && [ ! -L "$un" ] \
     || { CC_DEPART_NOTE="Le désinstalleur ($un) est absent : rien n'a été effacé."; return 14; }
+  want="$(cc_sum_signee uninstall.sh)" \
+    || { CC_DEPART_NOTE="Le manifeste signé de cette installation est absent ou invalide : le désinstalleur ne peut pas être authentifié, rien n'a été effacé. Relance une fois le lien d'installation (il le remet), puis reviens à « Partir »."; return 14; }
   tmpd="$(mktemp -d)" || { CC_DEPART_NOTE="Dossier temporaire impossible : rien n'a été effacé."; return 14; }
   chmod 700 "$tmpd"
   copie="$tmpd/uninstall.sh"
-  if ! { cp "$un" "$copie" && cmp -s "$un" "$copie" && bash -n "$copie" 2>/dev/null; }; then
+  if ! { cp "$un" "$copie" && [ "$(cc_sha256 "$copie")" = "$want" ] && bash -n "$copie" 2>/dev/null; }; then
     rm -rf "$tmpd"
-    CC_DEPART_NOTE="Le désinstalleur n'a pas pu être copié intact : rien n'a été effacé."; return 14
+    CC_DEPART_NOTE="Le désinstalleur n'a pas l'empreinte que la release signe (altéré, ou modifié pendant que le menu était ouvert) : rien n'a été effacé."; return 14
   fi
   cc_depart_releve
   cc_wipe || wrc=$?

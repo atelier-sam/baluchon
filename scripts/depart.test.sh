@@ -20,8 +20,14 @@
 #    - annulation : rien n'est touché ; désinstalleur altéré : code 14, rien n'est touché, le menu revient ;
 #    - « Partir » n'est proposé que sur une installation (marqueur + désinstalleur) ; en tête sur un poste
 #      invité, juste avant « Quitter » sinon ; la question est posée avec « Non » par défaut ;
-#    - lien symbolique, hôte d'accès noté par l'amorce (.baluchon-acces).
-#  Contrôle positif : l'ANCIEN Claude.command (c0172f7) ne propose pas « Partir » : l'épreuve échouerait.
+#    - lien symbolique, hôte d'accès noté par l'amorce (.baluchon-acces) ;
+#    - (revue Codex, 2e passe) le désinstalleur n'est exécuté que s'il a l'empreinte du manifeste SIGNÉ conservé
+#      par l'installation (remplacé pendant le menu, manifeste forgé, illisible : jamais exécuté, c'est dit) ;
+#      `config` est un lien : jamais suivi ; Trousseau verrouillé : « sessions non vérifiées », jamais « Rien ne
+#      reste » ; cache d'exécution (~/.cache/baluchon) retiré avec des bornes sûres ou nommé s'il reste.
+#  Contrôles positifs : l'ANCIEN Claude.command (c0172f7) ne propose pas « Partir » ; l'ANCIEN code (1238b14) exécute
+#  un désinstalleur remplacé, suit un lien sur `config`, lit un Trousseau verrouillé comme « absent » et oublie le
+#  cache : chaque épreuve nouvelle échouerait contre lui.
 #  Sortie : « N ok, M ko » ; code 0 seulement si M = 0.
 # ============================================================
 # SC2016 : les petits scripts d'essai s'écrivent volontairement entre apostrophes.
@@ -60,6 +66,19 @@ ne_dit_pas() {
   if grep -qF -- "$2" "$T/out" 2>/dev/null; then verdict faux "$1" "$(tail -n 15 "$T/out" 2>/dev/null)"; else verdict vrai "$1"; fi
 }
 
+# ── La clé d'essai (JAMAIS celle du produit) et les copies re-clées de la bibliothèque et du désinstalleur ─
+# Le menu et « Partir » authentifient ce qu'ils exécutent contre le manifeste SIGNÉ que l'installation conserve ;
+# la signature est vérifiée avec la clé épinglée dans la bibliothèque. L'essai pose donc une clé jetable à la
+# place, comme lien-unique.test.sh (même technique, la seule ligne CCP_SIGNER= change).
+command -v ssh-keygen >/dev/null 2>&1 || { echo "ssh-keygen est requis" >&2; exit 2; }
+CLE="$BASE/cle-essai"
+ssh-keygen -q -t ed25519 -N '' -C essai -f "$CLE" >/dev/null
+PUB="$(cut -d' ' -f1,2 "$CLE.pub")"
+recle() { # recle <source> <destination>
+  awk -v pub="$PUB" '/^CCP_SIGNER=/ && !fait {print "CCP_SIGNER='\''baluchon-release " pub "'\''"; fait=1; next} {print}' "$1" > "$2"
+}
+sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
+
 # Plateforme telle que la bibliothèque la voit (nom des dossiers bin/<plat>, tools/gum/<plat>).
 read -r PLAT CORE_PLAT BINNAME CC_OS_T < <(bash -c 'ROOT=/x; . "$1"; cc_detect_platform; echo "$PLAT $CORE_PLAT $BINNAME $CC_OS"' _ "$DEPOT/lib/common.sh")
 TROUSSEAU=0; [ "$CC_OS_T" = darwin ] && TROUSSEAU=1
@@ -88,6 +107,8 @@ case "$sub" in
     exit 1 ;;
   confirm)
     printf '%s\n' "$*" >> "$c/confirms"
+    # CTL/pendant-confirm : ce que fait un tiers PENDANT que le menu reste ouvert, avant la réponse.
+    [ ! -x "$c/pendant-confirm" ] || "$c/pendant-confirm"
     rc="$(pop "$c/confirm-rc")"; exit "${rc:-0}" ;;
   style) for last; do :; done; printf '%s\n' "$last"; exit 0 ;;
   *) exit 0 ;;
@@ -131,14 +152,20 @@ exit 64
 NOYAU
 cat > "$FAUX/security" <<'SEC'
 #!/usr/bin/env bash
-# Faux Trousseau : CTL/trousseau (un service par ligne) ; CTL/trousseau-refus = les suppressions échouent.
+# Faux Trousseau : CTL/trousseau (un service par ligne) ; CTL/trousseau-refus = les suppressions échouent ;
+# CTL/trousseau-ment = « supprimé » (0) sans rien retirer ; CTL/trousseau-verrouille = TOUT répond 36 (Trousseau
+# verrouillé : ni présent ni absent) ; CTL/trousseau-find-verrouille = seule la lecture répond 36.
 c="${GUM_CTL:?}"; f="$c/trousseau"; sub="${1:-}"; shift || true
 svc=""; while [ $# -gt 0 ]; do [ "$1" = -s ] && { svc="$2"; shift; }; shift; done
 case "$sub" in
-  find-generic-password) grep -qxF -- "$svc" "$f" 2>/dev/null && exit 0; exit 44 ;;
+  find-generic-password)
+    [ ! -e "$c/trousseau-verrouille" ] && [ ! -e "$c/trousseau-find-verrouille" ] || exit 36
+    grep -qxF -- "$svc" "$f" 2>/dev/null && exit 0; exit 44 ;;
   delete-generic-password)
     echo "delete $svc" >> "$c/security.log"
+    [ ! -e "$c/trousseau-verrouille" ] || exit 36
     [ ! -e "$c/trousseau-refus" ] || exit 1
+    [ ! -e "$c/trousseau-ment" ] || exit 0
     grep -qxF -- "$svc" "$f" 2>/dev/null || exit 44
     grep -vxF -- "$svc" "$f" > "$f.tmp"; mv -f "$f.tmp" "$f"; exit 0 ;;
 esac
@@ -153,16 +180,17 @@ chmod +x "$FAUX"/*
 # Pose T (dossier de l'épreuve), H (domicile), R (installation), CTL (état des faux), puis une
 # installation complète à deux profils connectés, un Mac configuré, des commandes, un Trousseau et des
 # jetons Access. $2 = Claude.command à poser (défaut : celui du dépôt).
-monde() { # monde <nom> [Claude.command]
+monde() { # monde <nom> [Claude.command]   (MONDE_LIB / MONDE_UN : bibliothèque / désinstalleur à poser, par défaut ceux du dépôt)
   T="$BASE/$1"; H="$T/home"; R="$H/.baluchon"; CTL="$T/ctl"
   mkdir -p "$T/bin" "$CTL" "$H/.local/bin" "$H/.cloudflared" "$R/lib" "$R/config/perso" "$R/config/pro" "$R/config/.hosts" \
            "$R/tools/gum/$PLAT" "$R/bin/$CORE_PLAT" "$R/bin/$PLAT" "$R/logs"
   cp "$FAUX/security" "$FAUX/curl" "$FAUX/sleep" "$T/bin/"
   cp "${2:-$DEPOT/Claude.command}" "$R/Claude.command"; chmod +x "$R/Claude.command"
-  cp "$DEPOT/lib/common.sh" "$R/lib/common.sh"; cp "$DEPOT/uninstall.sh" "$R/uninstall.sh"
+  recle "${MONDE_LIB:-$DEPOT/lib/common.sh}" "$R/lib/common.sh"; recle "${MONDE_UN:-$DEPOT/uninstall.sh}" "$R/uninstall.sh"
   printf 'baluchon-install 1\n' > "$R/.baluchon-install"
   cp "$FAUX/gum" "$R/tools/gum/$PLAT/gum"; cp "$FAUX/noyau" "$R/bin/$CORE_PLAT/baluchon-core"
   cp "$FAUX/claude" "$R/bin/$PLAT/$BINNAME"; printf '9.9.9\n' > "$R/VERSION"
+  notes_de_confiance
   printf '{"jeton":"faux"}\n' > "$R/config/perso/.credentials.json"; printf '{"jeton":"faux"}\n' > "$R/config/pro/.credentials.json"
   printf 'host = mac.example.test\nuser = sam\n' > "$R/config/remote.conf"
   printf 'perso\n' > "$R/ACTIVE"
@@ -174,6 +202,22 @@ monde() { # monde <nom> [Claude.command]
       service_de "$R/config/perso"; service_de "$R/config/pro"; } > "$CTL/trousseau"
   fi
   jetons mac.example.test
+}
+# Ce que l'installeur note après avoir tout vérifié : références de Claude et de gum (cc_ref_set, les VRAIES fonctions),
+# puis le manifeste signé (sommes de ce qui est posé, signées par la clé d'essai) conservé dans l'installation.
+notes_de_confiance() {
+  bash -c 'ROOT="$1"; . "$ROOT/lib/common.sh"; cc_detect_platform
+           cc_ref_set "bin/$PLAT/$BINNAME" "$(cc_sha256 "$ROOT/bin/$PLAT/$BINNAME")"
+           cc_ref_set "tools/gum/$PLAT/gum$EXE" "$(cc_sha256 "$ROOT/tools/gum/$PLAT/gum$EXE")"' _ "$R" 2>/dev/null
+  resigne
+}
+resigne() { # resigne : le manifeste signé reflète EXACTEMENT les fichiers posés maintenant (désinstalleur compris)
+  { printf '%s  Claude.command\n' "$(sha "$R/Claude.command")"
+    printf '%s  common.sh\n' "$(sha "$R/lib/common.sh")"
+    [ ! -f "$R/uninstall.sh" ] || printf '%s  uninstall.sh\n' "$(sha "$R/uninstall.sh")"
+    printf '%s  baluchon-core-%s\n' "$(sha "$R/bin/$CORE_PLAT/baluchon-core")" "$CORE_PLAT"; } > "$R/.baluchon-sums"
+  rm -f "$R/.baluchon-sums.sig"
+  ssh-keygen -q -Y sign -f "$CLE" -n file "$R/.baluchon-sums" >/dev/null 2>&1
 }
 confiance() { local k; k="$(hostname 2>/dev/null | tr -c 'a-zA-Z0-9_.-' '_')"; printf '%s\n' "$1" > "$R/config/.hosts/$k"; }
 service_de() { printf 'Claude Code-credentials-%s\n' "$(printf '%s' "$1" | shasum -a 256 | cut -c1-8)"; }
@@ -233,18 +277,57 @@ if [ "$TROUSSEAU" = 1 ]; then
   : > "$CTL/trousseau-refus"
   choix Partir; printf '0\n' > "$CTL/confirm-rc"
   joue
-  # Le noyau dit 1, le repli bash de cc_purge_sessions avale l'échec de `security`, les profils sont déjà
-  # effacés quand le désinstalleur passe : seul le Trousseau relu sait. D'où la relecture indépendante.
-  egal "3. item du Trousseau refusé (le noyau dit 1) : code 13, relevé sur le Trousseau" 13 "$RC"
+  # Le noyau dit 1, puis le repli bash de cc_purge_sessions voit lui-même le refus de `security` (code 1, ni 0
+  # ni 44) : avant, ce refus était avalé (code 13 par la seule relecture) ; maintenant l'effacement des sessions
+  # est dit mal fait (code 1). Le Trousseau relu à la fin nomme l'item.
+  egal "3. item du Trousseau refusé (le noyau dit 1, security refuse) : code 1, relevé sur le Trousseau" 1 "$RC"
   dit "3. …l'item est NOMMÉ" "Trousseau : l'item « Claude Code-credentials-"
   ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
-  # Un noyau qui répond 0 sans avoir rien effacé : seul le disque relu le dit.
+  # Un noyau qui répond 0 sans avoir rien effacé : personne ne le signale, seul le disque relu le dit (13).
   monde noyau-menteur
   : > "$CTL/purge-ment"; : > "$CTL/trousseau-refus"
   choix Partir; printf '0\n' > "$CTL/confirm-rc"
   joue
   egal "3. noyau menteur (0 sans rien effacer) : code 13, relevé sur le Trousseau" 13 "$RC"
   dit "3. …l'item est NOMMÉ" "Trousseau : l'item « Claude Code-credentials-"
+  # Un Trousseau qui MENT (« supprimé » sans rien retirer) : personne ne le signale, seul le disque relu le dit.
+  monde trousseau-ment
+  : > "$CTL/trousseau-ment"; : > "$CTL/purge-ment"
+  choix Partir; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  egal "3. Trousseau qui ment (0 sans rien retirer) : code 13, relevé sur le Trousseau" 13 "$RC"
+  dit "3. …l'item est NOMMÉ" "Trousseau : l'item « Claude Code-credentials-"
+  ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
+
+  # (revue Codex, 2e passe, MED 7) Trousseau VERROUILLÉ : ni `delete` ni `find` ne répondent « absent » (44),
+  # ils répondent une erreur. Avant : l'erreur valait « il n'y est plus » et « Rien ne reste » s'affichait.
+  monde trousseau-verrouille
+  : > "$CTL/trousseau-verrouille"
+  choix Partir; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  vrai_si "3. Trousseau verrouillé : le code n'est JAMAIS 0" test "$RC" != 0
+  ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
+  dit "3. …les sessions du Trousseau sont dites NON VÉRIFIÉES" "sessions non vérifiées"
+  # Le désinstalleur a pu tout effacer, mais la RELECTURE finale est impossible (verrou) : même honnêteté.
+  monde trousseau-lecture-verrouillee
+  : > "$CTL/trousseau-find-verrouille"
+  choix Partir; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  egal "3. relecture du Trousseau impossible (verrou) : code 13 (jamais 0)" 13 "$RC"
+  dit "3. …dit « sessions non vérifiées »" "sessions non vérifiées"
+  ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
+  # Contrôle positif : l'ANCIEN code (1238b14) lisait cette même erreur comme « absent » et annonçait « Rien ne reste ».
+  ANCIEN_REV=1238b14; AN="$BASE/anciens-fichiers"; mkdir -p "$AN"
+  if git -C "$DEPOT" show "$ANCIEN_REV:lib/common.sh" > "$AN/common.sh" 2>/dev/null && git -C "$DEPOT" show "$ANCIEN_REV:uninstall.sh" > "$AN/uninstall.sh" 2>/dev/null \
+     && git -C "$DEPOT" show "$ANCIEN_REV:Claude.command" > "$AN/Claude.command" 2>/dev/null && [ -s "$AN/common.sh" ]; then
+    MONDE_LIB="$AN/common.sh" MONDE_UN="$AN/uninstall.sh" monde ancien-trousseau "$AN/Claude.command"
+    : > "$CTL/trousseau-find-verrouille"
+    choix Partir; printf '0\n' > "$CTL/confirm-rc"
+    joue
+    dit "3. CONTRÔLE POSITIF : l'ancien code annonçait « Rien ne reste » avec un Trousseau illisible" "Rien ne reste"
+  else
+    echo "(!) historique git absent : le contrôle positif du Trousseau ($ANCIEN_REV) est sauté"
+  fi
 fi
 
 # ── 4. Une commande ne peut pas être supprimée ──────────────────────────────────────────────
@@ -273,11 +356,45 @@ ne_dit_pas "5. …jamais « Rien ne reste »" "Rien ne reste"
 # ── 6. Un désinstalleur qui MENT ne fait jamais dire « Rien ne reste » ─────────────────────────
 monde menteur
 printf '#!/usr/bin/env bash\necho "✓ Désinstallé. Plus aucune trace de Baluchon sur cette machine."\nexit 0\n' > "$R/uninstall.sh"
+resigne   # un désinstalleur menteur MAIS authentique (signé) : seule la relecture du disque peut le démentir
 choix Partir; printf '0\n' > "$CTL/confirm-rc"
 joue
 egal "6. désinstalleur menteur (0 sans rien faire) : code 13" 13 "$RC"
 ne_dit_pas "6. …jamais « Rien ne reste »" "Rien ne reste"
 dit "6. …ce qui reste est relu sur le disque" "est encore là"
+
+# ── 6b. (revue Codex, 2e passe, HIGH 4) Le désinstalleur est REMPLACÉ pendant que le menu reste ouvert ──
+# Un script parfaitement valide, qui laisse un témoin s'il tourne : avant, « Partir » le copiait (cmp + bash -n,
+# qui n'établissent que la ressemblance et la syntaxe) puis l'exécutait. Maintenant l'empreinte de la copie
+# doit être celle du manifeste signé.
+monde remplace-pendant-le-menu
+printf '#!/usr/bin/env bash\ntouch "%s"\nexit 0\n' "$T/pwned-uninstall" > "$CTL/uninstall-malveillant"
+printf '#!/bin/sh\ncp "%s" "%s/uninstall.sh"\n' "$CTL/uninstall-malveillant" "$R" > "$CTL/pendant-confirm"; chmod +x "$CTL/pendant-confirm"
+choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+joue
+vrai_si "6b. désinstalleur remplacé pendant le menu : il n'est JAMAIS exécuté" test ! -e "$T/pwned-uninstall"
+vrai_si "6b. …rien n'a été effacé (sessions, dossier)" test -f "$R/config/perso/.credentials.json" -a -f "$R/Claude.command"
+dit "6b. …et c'est dit (l'empreinte n'est pas celle que la release signe)" "n'a pas l'empreinte que la release signe"
+egal "6b. …le menu revient et se ferme normalement (code 0)" 0 "$RC"
+# Contrôle positif : l'ANCIEN « Partir » (1238b14 : cmp + bash -n) exécute ce remplaçant.
+if [ -s "${AN:-/inexistant}/common.sh" ]; then
+  MONDE_LIB="$AN/common.sh" MONDE_UN="$AN/uninstall.sh" monde remplace-ancien "$AN/Claude.command"
+  printf '#!/usr/bin/env bash\ntouch "%s"\nexit 0\n' "$T/pwned-uninstall" > "$CTL/uninstall-malveillant"
+  printf '#!/bin/sh\ncp "%s" "%s/uninstall.sh"\n' "$CTL/uninstall-malveillant" "$R" > "$CTL/pendant-confirm"; chmod +x "$CTL/pendant-confirm"
+  choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  vrai_si "6b. CONTRÔLE POSITIF : l'ancien « Partir » exécute le désinstalleur remplacé" test -e "$T/pwned-uninstall"
+fi
+
+# ── 6c. Désinstalleur ET manifeste réécrits par un tiers (la signature ne correspond plus) : refusé ────
+monde manifeste-forge
+printf '#!/usr/bin/env bash\ntouch "%s"\nexit 0\n' "$T/pwned-uninstall" > "$R/uninstall.sh"
+{ printf '%s  uninstall.sh\n' "$(sha "$R/uninstall.sh")"; printf '%s  Claude.command\n' "$(sha "$R/Claude.command")"; } > "$R/.baluchon-sums"
+choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+joue
+vrai_si "6c. manifeste réécrit sans signature valide : le désinstalleur n'est JAMAIS exécuté" test ! -e "$T/pwned-uninstall"
+dit "6c. …et c'est dit (manifeste signé absent ou invalide)" "manifeste signé de cette installation est absent ou invalide"
+vrai_si "6c. …rien n'a été effacé" test -f "$R/config/perso/.credentials.json"
 
 # ── 7. Annulation : rien n'est touché, le menu revient ──────────────────────────────────────
 monde annule
@@ -296,6 +413,13 @@ joue
 egal "8. désinstalleur illisible : le menu revient et se ferme (code 0)" 0 "$RC"
 vrai_si "8. …rien n'a été effacé (sessions comprises)" test -f "$R/config/perso/.credentials.json" -a -f "$R/Claude.command"
 dit "8. …et c'est dit" "rien n'a été effacé"
+# Même chose mais SIGNÉ (le manifeste dit que ce fichier-là est le bon) : seule la syntaxe l'arrête encore.
+monde altere-signe
+printf '#!/usr/bin/env bash\nif then fi (((\n' > "$R/uninstall.sh"; resigne
+choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+joue
+egal "8. désinstalleur illisible mais signé : le menu revient (code 0)" 0 "$RC"
+vrai_si "8. …rien n'a été effacé" test -f "$R/config/perso/.credentials.json" -a -f "$R/Claude.command"
 
 # ── 9. « Partir » n'est proposé que sur une installation, et à la bonne place ─────────────────
 monde sans-marqueur
@@ -362,6 +486,70 @@ choix Partir; printf '0\n' > "$CTL/confirm-rc"
 joue
 egal "12. hôte noté dont les jetons ne partent pas : code 10" 10 "$RC"
 dit "12. …le jeton est NOMMÉ" "acces.example.test-"
+
+# ── 14. (revue Codex, 2e passe, HIGH 5) `config` est un LIEN : « Partir » ne le suit JAMAIS ────────
+# Avant : cc_wipe supprimait ce que `"$ROOT"/config/*` désignait, donc les documents vers lesquels le lien menait,
+# avant même que les gardes de uninstall.sh ne soient consultées.
+monde config-lien
+mkdir -p "$T/temoin-config/Documents"; printf 'precieux\n' > "$T/temoin-config/Documents/these.txt"; printf 'precieux\n' > "$T/temoin-config/notes.txt"
+mv "$R/config/.hosts" "$T/temoin-config/.hosts"; rm -rf "$R/config/perso" "$R/config/pro" "$R/config/remote.conf"
+rmdir "$R/config"; ln -s "$T/temoin-config" "$R/config"
+choix Partir; printf '0\n' > "$CTL/confirm-rc"
+joue
+vrai_si "14. config lien : le dossier témoin est INTACT (fichiers et sous-dossiers)" test "$(cat "$T/temoin-config/Documents/these.txt" 2>/dev/null)" = precieux -a "$(cat "$T/temoin-config/notes.txt" 2>/dev/null)" = precieux
+vrai_si "14. …le code n'est JAMAIS 0" test "$RC" != 0
+dit "14. …le lien est SIGNALÉ" "lien symbolique"
+ne_dit_pas "14. …jamais « Rien ne reste »" "Rien ne reste"
+# Même scénario joué contre l'ANCIEN code (1238b14) : le contrôle positif — le témoin est supprimé.
+if [ -s "${AN:-/inexistant}/common.sh" ]; then
+  MONDE_LIB="$AN/common.sh" MONDE_UN="$AN/uninstall.sh" monde config-lien-ancien "$AN/Claude.command"
+  mkdir -p "$T/temoin-config/Documents"; printf 'precieux\n' > "$T/temoin-config/Documents/these.txt"; printf 'precieux\n' > "$T/temoin-config/notes.txt"
+  mv "$R/config/.hosts" "$T/temoin-config/.hosts"; rm -rf "$R/config/perso" "$R/config/pro" "$R/config/remote.conf"
+  rmdir "$R/config"; ln -s "$T/temoin-config" "$R/config"
+  choix Partir; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  vrai_si "14. CONTRÔLE POSITIF : l'ancien « Partir » suivait le lien et supprimait le témoin" test ! -e "$T/temoin-config/notes.txt"
+fi
+
+# ── 15. (LOW 8) Le cache d'exécution : retiré, borné, et jamais « Rien ne reste » s'il en reste ─────
+# Sur une clé montée sans exécution, les binaires sont copiés sous ~/.cache/baluchon ; .baluchon-cache en note les
+# dossiers. « Partir » les retire (jamais au-delà de la base, jamais à travers un lien) et relit le disque.
+monde cache
+mkdir -p "$H/.cache/baluchon/9.9.9/$PLAT" "$H/.cache/baluchon/overlay-core/$CORE_PLAT" "$H/.cache/autre-programme"
+printf 'copie\n' > "$H/.cache/baluchon/9.9.9/$PLAT/claude"; printf 'copie\n' > "$H/.cache/baluchon/overlay-core/$CORE_PLAT/baluchon-core"
+printf 'a-moi-pas\n' > "$H/.cache/autre-programme/fichier"
+mkdir -p "$H/Documents"; printf 'precieux\n' > "$H/Documents/these.txt"
+# Le fichier est écrit avec les droits de l'utilisateur : des lignes hostiles y sont ignorées, jamais suivies.
+{ printf '%s\n' "$H/.cache/baluchon/9.9.9/$PLAT" "$H/.cache/baluchon/overlay-core/$CORE_PLAT" \
+    "$H/Documents" "$H/.cache/autre-programme" "$H/.cache/baluchon/../../Documents" "relatif/chemin" "$H/.cache/baluchon"; } > "$R/.baluchon-cache"
+choix Partir; printf '0\n' > "$CTL/confirm-rc"
+joue
+egal "15. cache d'exécution : code 0" 0 "$RC"
+vrai_si "15. …les copies notées ont disparu (et leurs parents devenus vides, base comprise)" test ! -e "$H/.cache/baluchon"
+vrai_si "15. …un dossier d'un AUTRE programme dans ~/.cache est intact" test "$(cat "$H/.cache/autre-programme/fichier" 2>/dev/null)" = a-moi-pas
+vrai_si "15. …les lignes hostiles (Documents, ..) n'ont rien supprimé" test "$(cat "$H/Documents/these.txt" 2>/dev/null)" = precieux
+dit "15. …et le bilan dit « Rien ne reste »" "Rien ne reste"
+# Un dossier de cache qui est un LIEN vers des documents : jamais suivi, dit, code non nul.
+monde cache-lien
+mkdir -p "$H/Documents" "$H/.cache/baluchon/9.9.9"; printf 'precieux\n' > "$H/Documents/these.txt"
+ln -s "$H/Documents" "$H/.cache/baluchon/9.9.9/$PLAT"
+printf '%s\n' "$H/.cache/baluchon/9.9.9/$PLAT" > "$R/.baluchon-cache"
+choix Partir; printf '0\n' > "$CTL/confirm-rc"
+joue
+vrai_si "15. cache = lien vers Documents : le témoin est INTACT" test "$(cat "$H/Documents/these.txt" 2>/dev/null)" = precieux
+vrai_si "15. …le code n'est JAMAIS 0" test "$RC" != 0
+dit "15. …le cache restant est NOMMÉ" "Cache d'exécution"
+ne_dit_pas "15. …jamais « Rien ne reste »" "Rien ne reste"
+# Contrôle positif : l'ANCIEN « Partir » laissait le cache en place ET annonçait « Rien ne reste ».
+if [ -s "${AN:-/inexistant}/common.sh" ]; then
+  MONDE_LIB="$AN/common.sh" MONDE_UN="$AN/uninstall.sh" monde cache-ancien "$AN/Claude.command"
+  mkdir -p "$H/.cache/baluchon/9.9.9/$PLAT"; printf 'copie\n' > "$H/.cache/baluchon/9.9.9/$PLAT/claude"
+  printf '%s\n' "$H/.cache/baluchon/9.9.9/$PLAT" > "$R/.baluchon-cache"
+  choix Partir; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  vrai_si "15. CONTRÔLE POSITIF : l'ancien « Partir » laissait le cache en place…" test -e "$H/.cache/baluchon/9.9.9/$PLAT/claude"
+  dit "15. …ET disait « Rien ne reste »" "Rien ne reste"
+fi
 
 # ── 13. Contrôle positif : l'ANCIEN menu ne propose pas « Partir » (l'épreuve 1 y échouerait) ──
 ANCIEN="$BASE/Claude.command.ancien"

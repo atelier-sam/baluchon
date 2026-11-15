@@ -42,13 +42,30 @@ die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 sha() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
 
 # Télécharge un fichier de la release et le vérifie contre SHA256SUMS. $1 = nom publié, $2 = destination.
+# La copie VÉRIFIÉE reste dans $W (dossier privé, 700) : quand la bibliothèque doit être lue, c'est cette copie
+# qu'on lit, jamais le fichier posé sous $DIR, qu'un autre processus a pu remplacer entre le contrôle et la
+# lecture (revue Codex, 2e passe : la bibliothèque était hachée puis sourcée par son CHEMIN).
 fetch() {
   local want
   want="$(awk -v n="$1" '$2==n || $2=="*"n {print $1; exit}' "$W/SHA256SUMS")"
   [ -n "$want" ] || die "$1 absent de la release."
   curl -fsSL "$CCP_DL/$1" -o "$W/$1" || die "Téléchargement de $1 échoué."
   [ "$(sha "$W/$1")" = "$want" ] || die "Empreinte invalide pour $1 : installation annulée."
-  mkdir -p "$(dirname "$2")"; mv -f "$W/$1" "$2"
+  mkdir -p "$(dirname "$2")"; cp "$W/$1" "$2.new" && mv -f "$2.new" "$2"
+}
+
+# Copie PRIVÉE et AUTHENTIFIÉE de la bibliothèque posée sous $DIR : copiée dans $W, hachée SUR LA COPIE, et
+# acceptée seulement si son empreinte est celle que la release signe. Pose LIB_PRIVEE ; c'est elle, et elle
+# seule, que ce script source ensuite (jamais « $DIR/lib/common.sh » par son chemin).
+LIB_PRIVEE=""
+lib_privee() {
+  local want
+  [ -f "$DIR/lib/common.sh" ] && [ ! -L "$DIR/lib/common.sh" ] || return 1
+  want="$(awk '$2=="common.sh" || $2=="*common.sh" {print $1; exit}' "$W/SHA256SUMS")"
+  [ -n "$want" ] || return 1
+  cp "$DIR/lib/common.sh" "$W/lib-posee.sh" || return 1
+  [ "$(sha "$W/lib-posee.sh")" = "$want" ] || return 1
+  LIB_PRIVEE="$W/lib-posee.sh"
 }
 
 # L'installation de $DIR est-elle DÉJÀ exactement celle de cette release ? La bibliothèque posée n'est
@@ -56,11 +73,9 @@ fetch() {
 # l'installation n'est pas à jour, et on ne lit pas un fichier qu'on ne peut pas juger). Le jugement
 # lui-même est cc_release_a_jour (lib/common.sh), le même que celui qui écrit le relevé.
 deja_a_jour() {
-  local want
-  [ -f "$DIR/lib/common.sh" ] && [ ! -L "$DIR/lib/common.sh" ] || return 1
-  want="$(awk '$2=="common.sh" || $2=="*common.sh" {print $1; exit}' "$W/SHA256SUMS")"
-  [ -n "$want" ] && [ "$(sha "$DIR/lib/common.sh")" = "$want" ] || return 1
-  ( ROOT="$DIR"; . "$DIR/lib/common.sh"; cc_detect_platform; cc_release_a_jour "$W/SHA256SUMS" ) >/dev/null 2>&1
+  lib_privee || return 1
+  # shellcheck source=lib/common.sh
+  ( ROOT="$DIR"; . "$LIB_PRIVEE"; cc_detect_platform; cc_release_a_jour "$W/SHA256SUMS" ) >/dev/null 2>&1
 }
 
 # Installation complète : tout est vérifié contre les sommes signées AVANT d'être posé.
@@ -72,14 +87,17 @@ installer_complet() {
   # pour une installation complète.
   mkdir -p "$DIR"
   printf 'baluchon-install 1\n' > "$DIR/.baluchon-install"
-  rm -f "$DIR/.baluchon-release"
+  # Le relevé ET le manifeste conservé de l'ancienne release tombent ensemble : tant que l'installation n'est
+  # pas finie, rien n'est reconnu (ni « à jour », ni authentifié), et un fichier posé à moitié n'est jamais lancé.
+  rm -f "$DIR/.baluchon-release" "$DIR/.baluchon-sums" "$DIR/.baluchon-sums.sig"
 
-  # 2) Wizard + bibliothèque, puis plateforme via la bibliothèque vérifiée
+  # 2) Wizard + bibliothèque, puis plateforme via la bibliothèque vérifiée. On source la COPIE VÉRIFIÉE
+  # gardée dans $W (voir fetch), pas le fichier qui vient d'être posé sous $DIR.
   fetch Claude.command "$DIR/Claude.command"; chmod +x "$DIR/Claude.command"
   fetch common.sh "$DIR/lib/common.sh"
   ROOT="$DIR"
   # shellcheck source=lib/common.sh
-  . "$DIR/lib/common.sh"
+  . "$W/common.sh"
   cc_detect_platform
 
   # Le désinstalleur : l'entrée « Partir » du menu l'exécute. Une release qui ne le porte pas (anciennes)
@@ -140,8 +158,9 @@ installer() {
   if deja_a_jour; then
     etat=a-jour
     ROOT="$DIR"
+    # La copie privée authentifiée par deja_a_jour, jamais le fichier posé relu par son chemin.
     # shellcheck source=lib/common.sh
-    . "$DIR/lib/common.sh"
+    . "$LIB_PRIVEE"
     cc_detect_platform
     ok "Baluchon est déjà installé et à jour : rien à télécharger."
     poser_commandes   # locale et sans risque : rend la commande à qui l'avait supprimée
@@ -153,13 +172,16 @@ installer() {
     cc_layer_hook update || true
     # Le relevé « cette installation est celle de cette release » vient EN DERNIER : il n'existe que si tout
     # ce qui précède a été posé.
-    cc_release_noter "$W/SHA256SUMS" || printf '\033[33m⚠ Relevé de release non écrit : la prochaine exécution refera tout.\033[0m\n'
+    # Il conserve aussi le manifeste SIGNÉ (sommes + signature) : c'est lui qui authentifiera, plus tard, chaque
+    # exécutable avant qu'il soit lancé (menu, « Partir »), sans retélécharger.
+    cc_release_noter "$W/SHA256SUMS" "$W/SHA256SUMS.sig" || printf '\033[33m⚠ Relevé de release non écrit : la prochaine exécution refera tout, et « Partir » restera refusé jusque-là.\033[0m\n'
   fi
   if [ -n "${BALUCHON_ETAT_SORTIE:-}" ]; then printf '%s\n' "$etat" > "$BALUCHON_ETAT_SORTIE" 2>/dev/null || true; fi
 
   # Le menu, si demandé : AVANT les derniers messages, qui parlent de ce qui reste à faire une fois le menu fermé.
   if [ "${BALUCHON_OUVRIR_MENU:-0}" = 1 ]; then
-    cc_open_menu "$DIR/Claude.command" || menu_rc=$?
+    # Les sommes dont la signature vient d'être vérifiée : le menu n'est lancé que si l'installation y correspond.
+    cc_open_menu "$DIR/Claude.command" "$W/SHA256SUMS" || menu_rc=$?
     # « Partir » a pu tout effacer : plus rien à annoncer, et le code de sortie dit ce qui reste.
     if ! cc_est_installation "$DIR"; then exit "$menu_rc"; fi
   fi

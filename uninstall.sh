@@ -6,23 +6,38 @@
 #  Supprime TOUT : binaires, interface, sessions, l'item Trousseau macOS de chaque profil,
 #  les jetons Cloudflare Access laissés par la liaison avec le Mac, et la couche
 #  (overlay/) éventuelle, après avoir appelé son crochet `uninstall`.
-#  C'est aussi ce que fait l'entrée « Partir » du menu : elle exécute une COPIE de ce fichier, vérifiée
-#  (cmp, bash -n), car le dossier qu'on efface contient le script. Les gardes ci-dessous n'existent donc
-#  qu'ici ; le menu ne les recopie pas.
+#  C'est aussi ce que fait l'entrée « Partir » du menu : elle exécute une COPIE de ce fichier, dont l'empreinte
+#  est celle que le manifeste SIGNÉ de l'installation donne (cc_depart, lib/common.sh), car le dossier qu'on
+#  efface contient le script. Les gardes ci-dessous n'existent donc qu'ici ; le menu ne les recopie pas.
 #  Il ne supprime QUE un dossier qui porte le marqueur d'installation (.baluchon-install), qui
 #  n'est ni « / », ni ton domicile, ni un parent de ton domicile (chemin canonique, liens suivis),
 #  et dont aucun ancêtre ne peut être modifié par un autre utilisateur.
+#  Il n'EXÉCUTE rien qu'il n'ait authentifié : un noyau (ou un crochet de couche) n'est lancé que si son
+#  empreinte est celle du manifeste signé conservé par l'installation (noyau public) ou celle que l'amorce a
+#  notée après avoir vérifié les sommes signées de la couche (.baluchon-refs). Sinon il n'est pas lancé, et
+#  ce qu'il aurait effacé est dit au bilan. Niveau de confiance : la clé qui vérifie est celle épinglée ICI
+#  (la même que dans install.sh et lib/common.sh) ; c'est le même niveau que le menu lui-même.
+#  Il ne suit JAMAIS un lien symbolique pour effacer : config, un profil ou un dossier de cache qui est un
+#  lien est signalé et laissé en place.
 #
 #  Codes de sortie : 0 = tout est effacé ; 1 = rien à désinstaller ou annulé ; 2 = refusé (rien n'est
 #  supprimé) ; 10 = des jetons Cloudflare Access restent utilisables ; 11 = la purge des sessions
-#  est incomplète ; 12 = le dossier n'a pas pu être supprimé en entier. Un code 10, 11 ou 12 dit
-#  ce qui reste, sur la sortie d'erreur : jamais « Plus aucune trace » dans ce cas.
+#  est incomplète (dont : Trousseau illisible, config en lien) ; 12 = le dossier ou un cache d'exécution
+#  n'a pas pu être supprimé en entier. Un code 10, 11 ou 12 dit ce qui reste, sur la sortie d'erreur :
+#  jamais « Plus aucune trace » dans ce cas.
 # ============================================================
 set -uo pipefail
 DIR_DEMANDE="${BALUCHON_DIR:-$HOME/.baluchon}"
 BINDIR="$HOME/.local/bin"
 OUI=0
 [ "${1:-}" = "--oui" ] && OUI=1
+# Clé qui signe les releases du produit (même constante que install.sh et lib/common.sh).
+CCP_SIGNER='baluchon-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIRcs8TrzgdQa1DTZ/Tdt2qUYCBeNuJ1p/DP27yyDttp'
+CCP_SIGNER_ID="${CCP_SIGNER%% *}"
+PRIV=""   # dossier privé (700) où vit la copie vérifiée du manifeste signé ; retiré à la sortie
+# shellcheck disable=SC2329  # appelée par le piège EXIT ci-dessous
+nettoie_priv() { case "$PRIV" in /*?) rm -rf "$PRIV" ;; esac; }
+trap nettoie_priv EXIT
 
 # ── Ce qu'on a le droit d'effacer ───────────────────────────────────────────────
 # Un `rm -rf` sur une variable est le geste le plus dangereux de ce dépôt. Comparer des CHAÎNES ne
@@ -131,17 +146,74 @@ if [ "$OUI" != 1 ]; then
 fi
 verifie_ou_refuse
 
+# ── Ce qu'on a le droit d'EXÉCUTER ──────────────────────────────────────────────────
+# Revue Codex, 2e passe : choisir un noyau par `--contract` EXÉCUTAIT déjà un fichier que rien n'avait
+# authentifié. Désormais, aucun noyau n'est lancé, pas même pour une sonde, avant d'avoir été comparé à une
+# empreinte authentifiée :
+#   - noyau public (bin/<plat>/baluchon-core) : empreinte du manifeste SIGNÉ que l'installation a conservé
+#     (.baluchon-sums + .sig), dont la signature est vérifiée ICI sur une copie privée, avec la clé épinglée ;
+#   - noyau de la couche (overlay/gen/<nom>/bin/<plat>/baluchon-core) : empreinte notée dans .baluchon-refs
+#     par l'amorce de l'atelier, seule à connaître la clé de la couche (elle y vérifie les sommes signées de la
+#     couche avant de noter) ;
+#   - crochet uninstall de la couche : même règle que le noyau de la couche.
+# Honnêteté : .baluchon-refs est écrit avec les droits de l'utilisateur ; il protège d'un fichier remplacé SEUL,
+# pas de qui réécrit toute l'installation (celui-là n'a pas besoin de ce script pour agir).
+SUMS_PRIVE=""
+manifeste_signe() { # pose SUMS_PRIVE (copie privée du manifeste dont la signature est valide), ou rend 1
+  local sk
+  sk="$(command -v ssh-keygen 2>/dev/null)"; [ -n "$sk" ] || return 1
+  { [ -f "$DIR/.baluchon-sums" ] && [ ! -L "$DIR/.baluchon-sums" ] \
+    && [ -f "$DIR/.baluchon-sums.sig" ] && [ ! -L "$DIR/.baluchon-sums.sig" ]; } || return 1
+  PRIV="$(mktemp -d)" || { PRIV=""; return 1; }
+  chmod 700 "$PRIV" 2>/dev/null || true
+  if cp "$DIR/.baluchon-sums" "$PRIV/SHA256SUMS" && cp "$DIR/.baluchon-sums.sig" "$PRIV/SHA256SUMS.sig" \
+     && printf '%s\n' "$CCP_SIGNER" > "$PRIV/allowed_signers" \
+     && "$sk" -Y verify -f "$PRIV/allowed_signers" -I "$CCP_SIGNER_ID" -n file -s "$PRIV/SHA256SUMS.sig" < "$PRIV/SHA256SUMS" >/dev/null 2>&1; then
+    SUMS_PRIVE="$PRIV/SHA256SUMS"; return 0
+  fi
+  return 1
+}
+sha() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
+# Empreinte notée dans .baluchon-refs pour un chemin relatif à $DIR ; vide si aucune.
+ref_de() {
+  [ -f "$DIR/.baluchon-refs" ] && [ ! -L "$DIR/.baluchon-refs" ] || return 0
+  awk -v p="$1" '$2==p {print $1; exit}' "$DIR/.baluchon-refs"
+}
+# 0 si $1 (fichier ordinaire, pas un lien) a l'empreinte attendue pour lui : manifeste signé pour le noyau
+# public, référence notée pour tout ce qui est sous overlay/.
+authentique() { # authentique <chemin>
+  local f="$1" rel nom plat want="" got
+  [ -f "$f" ] && [ ! -L "$f" ] || return 1
+  rel="${f#"$DIR"/}"
+  case "$rel" in
+    overlay/*) want="$(ref_de "$rel")" ;;
+    bin/*/baluchon-core|bin/*/baluchon-core.exe)
+      [ -n "$SUMS_PRIVE" ] || return 1
+      plat="${rel#bin/}"; plat="${plat%%/*}"; nom="baluchon-core-$plat"
+      case "$rel" in *.exe) nom="$nom.exe" ;; esac
+      want="$(awk -v n="$nom" '$2==n || $2=="*"n {print $1; exit}' "$SUMS_PRIVE")" ;;
+    *) return 1 ;;
+  esac
+  [ -n "$want" ] || return 1
+  got="$(sha "$f")"
+  [ -n "$got" ] && [ "$got" = "$want" ]
+}
+
 # Le noyau qui sait le mieux effacer : celui de la couche s'il y en a un qui répond, sinon le public.
-# Chaque candidat doit répondre à --contract (un binaire d'une autre plateforme n'est pas choisi).
+# Chaque candidat doit d'abord être AUTHENTIFIÉ, puis répondre à --contract (un binaire d'une autre
+# plateforme n'est pas choisi).
 CORE=""
-choisir_noyau() { # choisir_noyau <candidat>... : pose CORE au premier qui répond à --contract
+CORE_REFUSES=""   # candidats présents mais non authentifiés : dits au bilan, jamais lancés
+choisir_noyau() { # choisir_noyau <candidat>... : pose CORE au premier authentique qui répond à --contract
   local c
   for c in "$@"; do
     [ -x "$c" ] || continue
+    if ! authentique "$c"; then CORE_REFUSES="${CORE_REFUSES}${CORE_REFUSES:+ }${c#"$DIR"/}"; continue; fi
     "$c" --contract >/dev/null 2>&1 && { CORE="$c"; return 0; }
   done
   return 1
 }
+manifeste_signe || true
 LDIR="$(couche_dir || true)"
 [ -z "$LDIR" ] || choisir_noyau "$LDIR"/bin/*/baluchon-core || true
 [ -n "$CORE" ] || choisir_noyau "$DIR"/bin/*/baluchon-core || true
@@ -157,10 +229,16 @@ incomplet() { # incomplet <code> <texte>
 indente() { printf '%s\n' "$1" | sed 's/^/      /' | head -n 20; }
 
 # 1) Le crochet de la couche défait ce que la couche a posé hors de overlay/.
+# Il n'est lancé que s'il a l'empreinte notée par l'amorce (voir authentique) ; sinon il est DIT, car ce qu'il
+# aurait défait hors de overlay/ peut rester.
 if [ -f "$DIR/overlay/hooks/uninstall" ]; then
   verifie_ou_refuse
-  BALUCHON_ROOT="$DIR" bash "$DIR/overlay/hooks/uninstall" \
-    || echo "  ⚠ Le crochet uninstall de la couche a échoué : on continue, le dossier est supprimé en entier." >&2
+  if authentique "$DIR/overlay/hooks/uninstall"; then
+    BALUCHON_ROOT="$DIR" bash "$DIR/overlay/hooks/uninstall" \
+      || echo "  ⚠ Le crochet uninstall de la couche a échoué : on continue, le dossier est supprimé en entier." >&2
+  else
+    incomplet 12 "Le crochet uninstall de la couche n'a pas d'empreinte authentifiée : il n'a PAS été lancé. Ce que la couche a posé hors de $DIR (s'il y en a) reste à retirer à la main."
+  fi
 fi
 
 # 2) macOS : chaque profil du portable a SA session dans le Trousseau, sous
@@ -169,7 +247,11 @@ fi
 # items-là, calculés depuis les dossiers de ce portable, AVANT d'effacer le
 # dossier. Surtout pas « Claude Code-credentials » sans suffixe : c'est la
 # session du Claude Code normal de la machine (~/.claude), pas la nôtre.
-if [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ]; then
+# Un `config` qui est un LIEN ne se suit jamais (revue Codex : il menait à ~/Documents) : ni purge par le noyau,
+# ni parcours des profils ; c'est dit, et le code est 11.
+if [ -L "$DIR/config" ]; then
+  incomplet 11 "« config » est un lien symbolique : il n'a pas été suivi, les sessions qu'il désigne n'ont PAS été effacées."
+elif [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ]; then
   verifie_ou_refuse
   if [ -n "$CORE" ]; then
     sortie="$("$CORE" --root "$DIR" accounts purge 2>&1)"; rc=$?
@@ -181,7 +263,14 @@ if [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ]; then
     [ -d "$d" ] || continue
     cfg="${d%/}"
     svc="Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)"
-    security delete-generic-password -s "$svc" >/dev/null 2>&1 && echo "  - Trousseau : $svc supprimé"
+    # 0 = supprimé, 44 = l'item n'existait pas (déjà effacé par le noyau) : les deux disent « plus rien ».
+    # Toute autre réponse (Trousseau verrouillé, accès refusé) n'établit RIEN : jamais « Plus aucune trace ».
+    security delete-generic-password -s "$svc" >/dev/null 2>&1; sr=$?
+    case "$sr" in
+      0)  echo "  - Trousseau : $svc supprimé" ;;
+      44) ;;
+      *)  incomplet 11 "Trousseau : « $svc » n'a pas pu être effacé, ni son absence établie (code $sr ; Trousseau verrouillé ?)." ;;
+    esac
   done
 fi
 
@@ -195,7 +284,7 @@ if [ -n "$CORE" ]; then
     incomplet 10 "Des jetons Cloudflare Access restent UTILISABLES sur cet ordinateur (code $rc) :"$'\n'"$(indente "$sortie")"
   fi
 elif [ -f "$DIR/config/remote.conf" ] || [ -f "$DIR/.baluchon-acces" ]; then
-  incomplet 10 "Aucun noyau n'a répondu : les jetons Cloudflare Access éventuels (fichiers « …-token » de ~/.cloudflared) n'ont pas pu être effacés."
+  incomplet 10 "Aucun noyau authentifié n'a répondu${CORE_REFUSES:+ (non lancés, empreinte non authentifiée : $CORE_REFUSES)} : les jetons Cloudflare Access éventuels (fichiers « …-token » de ~/.cloudflared) n'ont pas pu être effacés."
 fi
 # Les hôtes que l'AMORCE de l'atelier a notés dans .baluchon-acces (noms seulement, un par ligne) parce que
 # ses jetons Access avaient pu rester : ils ne sont pas dans config/remote.conf, donc le `forget-access`
@@ -210,6 +299,43 @@ if [ -n "$CORE" ] && [ -f "$DIR/.baluchon-acces" ] && [ ! -L "$DIR/.baluchon-acc
       incomplet 10 "Des jetons Cloudflare Access de « $h » restent UTILISABLES sur cet ordinateur (code $rc) :"$'\n'"$(indente "$sortie")"
     fi
   done < "$DIR/.baluchon-acces"
+fi
+
+# Les copies d'exécution (revue Codex : le bilan oubliait le cache) : sur une clé montée sans exécution, le
+# portable copie ses binaires sous ${XDG_CACHE_HOME:-~/.cache}/baluchon et en note les dossiers dans
+# .baluchon-cache. On retire SEULEMENT ceux-là, avec des bornes : strictement sous la base, sans « .. » ni « // »,
+# aucun composant qui soit un lien, un vrai dossier, à toi. Une ligne qui ne tient pas ces bornes n'est jamais
+# suivie : elle est dite. Les dossiers parents devenus vides sont retirés avec, jamais un parent non vide.
+CACHE_BASE="${XDG_CACHE_HOME:-$HOME/.cache}/baluchon"
+sans_lien() { # sans_lien <chemin sous CACHE_BASE> : aucun composant, de la base au chemin, n'est un lien
+  local cur="$CACHE_BASE" reste="${1#"$CACHE_BASE"/}" part
+  [ ! -L "$cur" ] || return 1
+  while [ -n "$reste" ]; do
+    part="${reste%%/*}"; cur="$cur/$part"
+    [ ! -L "$cur" ] || return 1
+    case "$reste" in */*) reste="${reste#*/}" ;; *) reste="" ;; esac
+  done
+}
+if [ -f "$DIR/.baluchon-cache" ] && [ ! -L "$DIR/.baluchon-cache" ]; then
+  verifie_ou_refuse
+  while IFS= read -r c || [ -n "$c" ]; do
+    c="${c%$'\r'}"
+    case "$c" in "$CACHE_BASE"/?*) ;; *) continue ;; esac
+    case "$c" in *..*|*//*) continue ;; esac
+    { [ -e "$c" ] || [ -L "$c" ]; } || continue
+    if ! sans_lien "$c" || [ ! -d "$c" ] || [ -z "$(find "$c" -maxdepth 0 -user "$(id -u)" 2>/dev/null)" ]; then
+      incomplet 12 "Cache d'exécution NON effacé (lien, pas un dossier, ou pas à toi) : $c"
+      continue
+    fi
+    rm -rf -- "$c" 2>/dev/null
+    if [ -e "$c" ]; then incomplet 12 "Cache d'exécution non supprimé en entier : $c"; continue; fi
+    p="$(dirname -- "$c")"
+    while [ "$p" != "$CACHE_BASE" ] && [ "${p#"$CACHE_BASE"/}" != "$p" ]; do
+      rmdir "$p" 2>/dev/null || break
+      p="$(dirname -- "$p")"
+    done
+    rmdir "$CACHE_BASE" 2>/dev/null || true
+  done < "$DIR/.baluchon-cache"
 fi
 
 # On efface le dossier PHYSIQUE jugé plus haut, sans repasser par son chemin : on entre dans le dossier

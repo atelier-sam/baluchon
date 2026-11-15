@@ -26,7 +26,15 @@
 #    - un maillon du chemin (ancêtre ou dossier) ÉCHANGÉ contre un lien entre le jugement et l'effacement
 #      — par le crochet de la couche, ou en dernier recours par le noyau, juste avant l'effacement —
 #      donne un refus (code 2) et la cible du lien (un faux « domicile ») reste intacte ; le même
-#      échange rejoué contre l'ANCIEN script supprime la cible (contrôle positif).
+#      échange rejoué contre l'ANCIEN script supprime la cible (contrôle positif) ;
+#    - (3e passe Codex, section 10) AUCUN fichier n'est exécuté avant d'avoir été comparé à une empreinte
+#      authentifiée : un noyau (même pour `--contract`) ou un crochet de la couche non authentifié n'est jamais
+#      lancé et c'est dit (code 10 / 12) ; un `config` qui est un LIEN n'est pas suivi (code 11) ; un `security`
+#      qui répond autre chose que 0 ou 44 n'est pas « absent » (code 11) ; le cache d'exécution noté dans
+#      .baluchon-cache est retiré avec ses bornes (jamais une ligne hostile, jamais à travers un lien, code 12).
+#      Chaque épreuve nouvelle est rejouée contre l'ANCIEN script (contrôle positif).
+#    La signature du manifeste se vérifie avec la clé épinglée dans uninstall.sh : l'essai pose une clé JETABLE à
+#    sa place (copie re-clée du script, la seule ligne CCP_SIGNER= change), jamais la clé du produit.
 #
 #  Le Trousseau et le noyau sont des FAUX (dans le PATH / le dossier d'essai) : aucun vrai item,
 #  aucun vrai jeton, aucun vrai `claude`. Rien n'est jamais supprimé hors de <dossier-vide-absolu>.
@@ -40,8 +48,9 @@ set -uo pipefail
 ulimit -u "$(( $(ps -A | wc -l) + 300 ))" 2>/dev/null || true
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UNINSTALL="$HERE/../uninstall.sh"
-[ -f "$UNINSTALL" ] || { echo "uninstall.sh introuvable" >&2; exit 2; }
+UN_SRC="$HERE/../uninstall.sh"
+[ -f "$UN_SRC" ] || { echo "uninstall.sh introuvable" >&2; exit 2; }
+command -v ssh-keygen >/dev/null 2>&1 || { echo "ssh-keygen est requis" >&2; exit 2; }
 
 BASE_IN="${1:-}"
 [ -n "$BASE_IN" ] || { echo "usage : uninstall.test.sh <dossier-vide-absolu>" >&2; exit 2; }
@@ -49,6 +58,16 @@ case "$BASE_IN" in /*) ;; *) echo "le dossier doit être un chemin ABSOLU" >&2; 
 [ -d "$BASE_IN" ] || { echo "dossier absent : $BASE_IN" >&2; exit 2; }
 [ -z "$(ls -A "$BASE_IN")" ] || { echo "le dossier n'est pas vide : $BASE_IN" >&2; exit 2; }
 BASE="$(cd "$BASE_IN" && pwd -P)"
+
+# La clé d'essai (JAMAIS celle du produit) : uninstall.sh vérifie le manifeste signé de l'installation avec la clé
+# épinglée dans son texte ; l'essai joue donc une copie où la seule ligne CCP_SIGNER= est remplacée.
+CLE="$BASE/cle-essai"
+ssh-keygen -q -t ed25519 -N '' -C essai -f "$CLE" >/dev/null
+PUB="$(cut -d' ' -f1,2 "$CLE.pub")"
+UNINSTALL="$BASE/uninstall-essai.sh"
+awk -v pub="$PUB" '/^CCP_SIGNER=/ && !fait {print "CCP_SIGNER='\''baluchon-release " pub "'\''"; fait=1; next} {print}' "$UN_SRC" > "$UNINSTALL"
+[ -s "$UNINSTALL" ] || { echo "copie re-clée impossible" >&2; exit 2; }
+sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 
 OK=0
 KO=0
@@ -67,7 +86,8 @@ FAUX="$BASE/faux-bin"
 JOURNAL_SECURITY="$BASE/security.log"
 JOURNAL_NOYAU="$BASE/noyau.log"
 mkdir -p "$FAUX"
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit 0\n' "$JOURNAL_SECURITY" > "$FAUX/security"
+# Réponse du faux `security` : celle de $BASE/security-rc (défaut 0). 44 = l'item n'existe pas ; 36 = Trousseau verrouillé.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit "$(cat "%s/security-rc" 2>/dev/null || echo 0)"\n' "$JOURNAL_SECURITY" "$BASE" > "$FAUX/security"
 chmod +x "$FAUX/security"
 
 # ── Un domicile jetable, avec des TÉMOINS qui ne doivent jamais disparaître ──────────────────────────
@@ -93,6 +113,23 @@ faire_install() { # faire_install <dossier>
   chmod +x "$d/bin/plat/baluchon-core"
   printf 'x\n' > "$d/Claude.command"
   printf 'secret\n' > "$d/config/p1/.credentials.json"
+  signe_noyau "$d"
+}
+# Ce que l'installeur conserve : le manifeste SIGNÉ (sommes de ce qui est posé), dont uninstall.sh se sert pour
+# reconnaître le noyau public avant de le lancer. À rappeler chaque fois qu'un test réécrit le noyau.
+signe_noyau() { # signe_noyau <dossier>
+  local d="$1" n
+  rm -f "$d/.baluchon-sums" "$d/.baluchon-sums.sig"
+  for n in "$d"/bin/*/baluchon-core; do
+    [ -f "$n" ] || continue
+    printf '%s  baluchon-core-%s\n' "$(sha "$n")" "$(basename "$(dirname "$n")")" >> "$d/.baluchon-sums"
+  done
+  [ -f "$d/.baluchon-sums" ] || : > "$d/.baluchon-sums"
+  ssh-keygen -q -Y sign -f "$CLE" -n file "$d/.baluchon-sums" >/dev/null 2>&1
+}
+# Ce que l'amorce de l'atelier note après avoir vérifié la couche : l'empreinte d'un fichier de overlay/ (.baluchon-refs).
+note_ref() { # note_ref <dossier> <chemin relatif à ce dossier>
+  printf '%s  %s\n' "$(sha "$1/$2")" "$2" >> "$1/.baluchon-refs"
 }
 
 lancer() { # lancer <BALUCHON_DIR ou rien> [dossier-de-travail] : uninstall.sh --oui dans le faux domicile
@@ -122,7 +159,7 @@ expect_refus() { # expect_refus <libellé> <BALUCHON_DIR> [cwd] : code 2, rien d
 }
 
 echo "== 0. syntaxe =="
-bash -n "$UNINSTALL" && verdict vrai "bash -n uninstall.sh" || verdict faux "bash -n uninstall.sh"
+bash -n "$UN_SRC" && verdict vrai "bash -n uninstall.sh" || verdict faux "bash -n uninstall.sh"
 bash -n "${BASH_SOURCE[0]}" && verdict vrai "bash -n uninstall.test.sh" || verdict faux "bash -n uninstall.test.sh"
 
 echo "== 1. refus : le domicile et ses parents, sous toutes leurs écritures =="
@@ -265,6 +302,7 @@ esac
 exit 0
 EOF
   chmod +x "$d/bin/plat/baluchon-core"
+  signe_noyau "$d"
 }
 INST7="$BASE/bilan-forget"
 faire_install "$INST7"; faire_noyau "$INST7" 0 10
@@ -337,6 +375,7 @@ scenario_ancetre() { # scenario_ancetre <nom> <script> : l'installation est $BAS
   mkdir -p "$ext/p/${n}v/overlay/hooks"
   # Après l'échange, $ext/p/<n>v désigne $BASE/<n>v : la VICTIME (le « domicile » de l'attaque de Codex).
   printf '#!/usr/bin/env bash\nmv "%s/p" "%s/p.reel" && ln -s "%s" "%s/p"\n' "$ext" "$ext" "$BASE" "$ext" > "$ext/p/${n}v/overlay/hooks/uninstall"
+  note_ref "$ext/p/${n}v" overlay/hooks/uninstall   # le crochet est AUTHENTIFIÉ (noté par l'amorce) : il est donc bien lancé
   SCRIPT_SOUS_TEST="$2" lancer "$ext/p/${n}v"
 }
 scenario_ancetre echange-nouveau "$UNINSTALL"
@@ -356,6 +395,7 @@ printf 'precieux\n' > "$BASE/${fn}v/temoin.txt"
 faire_install "$ext/p/inst"
 mkdir -p "$ext/p/inst/overlay/hooks"
 printf '#!/usr/bin/env bash\nmv "%s/p/inst" "%s/p/inst.reel" && ln -s "%s/%sv" "%s/p/inst"\n' "$ext" "$ext" "$BASE" "$fn" "$ext" > "$ext/p/inst/overlay/hooks/uninstall"
+note_ref "$ext/p/inst" overlay/hooks/uninstall
 lancer "$ext/p/inst"
 [ "$LAST_RC" -eq 2 ] && [ "$(cat "$BASE/${fn}v/temoin.txt" 2>/dev/null)" = precieux ] \
   && verdict vrai "dossier remplacé par un lien après le jugement : refus (code 2), cible intacte" \
@@ -375,6 +415,7 @@ case "\$*" in
 esac
 exit 0
 EOF
+  signe_noyau "$ext/p/${n}v"   # ce noyau-là est authentique : c'est précisément lui qui opère l'échange
   SCRIPT_SOUS_TEST="$2" lancer "$ext/p/${n}v"
 }
 scenario_fenetre fenetre-nouveau "$UNINSTALL"
@@ -386,6 +427,148 @@ if [ "$A_ANCIEN" = 1 ]; then
   [ ! -e "$BASE/fenetre-ancienv/temoin.txt" ] \
     && verdict vrai "CONTRÔLE POSITIF : le même échange fait supprimer la cible par l'ANCIEN script (résolution en double)" \
     || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû supprimer la cible" "$LAST_RC $LAST_OUT"
+fi
+
+echo "== 10. rien n'est EXÉCUTÉ avant d'être authentifié (revue Codex, 3e passe) =="
+# Un noyau qui laisse un témoin dès qu'on le lance, quel que soit l'argument (`--contract` compris).
+noyau_temoin() { # noyau_temoin <fichier> <témoin>
+  printf '#!/usr/bin/env bash\ntouch "%s"\nexit 0\n' "$2" > "$1"
+  chmod +x "$1"
+}
+# 10a. Noyau public remplacé APRÈS la signature du manifeste : l'empreinte ne correspond plus.
+I="$BASE/noyau-remplace"; faire_install "$I"
+printf 'host = mac.example.test\n' > "$I/config/remote.conf"
+noyau_temoin "$I/bin/plat/baluchon-core" "$BASE/pwned-noyau"
+lancer "$I"
+[ ! -e "$BASE/pwned-noyau" ] && verdict vrai "noyau remplacé après la signature : JAMAIS lancé (pas même pour --contract)" || verdict faux "noyau remplacé après la signature : jamais lancé" "$LAST_RC $LAST_OUT"
+[ "$LAST_RC" -eq 10 ] && verdict vrai "…un Mac est configuré et aucun noyau authentique ne répond : code 10" || verdict faux "…code 10" "$LAST_RC $LAST_OUT"
+case "$LAST_OUT" in *"empreinte non authentifiée"*"bin/plat/baluchon-core"*) verdict vrai "…le noyau refusé est NOMMÉ" ;; *) verdict faux "…le noyau refusé est NOMMÉ" "$LAST_OUT" ;; esac
+case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "…jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "…jamais « Plus aucune trace »" ;; esac
+if [ "$A_ANCIEN" = 1 ]; then
+  I="$BASE/noyau-remplace-ancien"; faire_install "$I"
+  noyau_temoin "$I/bin/plat/baluchon-core" "$BASE/pwned-noyau-ancien"
+  SCRIPT_SOUS_TEST="$ANCIEN" lancer "$I"
+  [ -e "$BASE/pwned-noyau-ancien" ] && verdict vrai "CONTRÔLE POSITIF : l'ANCIEN script lance le noyau remplacé (au moins --contract)" || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû lancer le noyau" "$LAST_RC $LAST_OUT"
+fi
+# 10b. Installation d'avant (aucun manifeste signé conservé) : rien ne peut être authentifié, rien n'est lancé.
+I="$BASE/noyau-sans-manifeste"; faire_install "$I"
+printf 'host = mac.example.test\n' > "$I/config/remote.conf"
+rm -f "$I/.baluchon-sums" "$I/.baluchon-sums.sig"
+noyau_temoin "$I/bin/plat/baluchon-core" "$BASE/pwned-sans-manifeste"
+lancer "$I"
+[ ! -e "$BASE/pwned-sans-manifeste" ] && [ "$LAST_RC" -eq 10 ] && verdict vrai "aucun manifeste signé conservé : noyau jamais lancé, c'est dit (code 10)" || verdict faux "aucun manifeste : noyau jamais lancé, code 10" "$LAST_RC $LAST_OUT"
+# 10c. Manifeste RÉÉCRIT par un tiers avec l'empreinte de son noyau, la signature restant celle d'origine.
+I="$BASE/noyau-manifeste-forge"; faire_install "$I"
+printf 'host = mac.example.test\n' > "$I/config/remote.conf"
+noyau_temoin "$I/bin/plat/baluchon-core" "$BASE/pwned-forge"
+printf '%s  baluchon-core-plat\n' "$(sha "$I/bin/plat/baluchon-core")" > "$I/.baluchon-sums"
+lancer "$I"
+[ ! -e "$BASE/pwned-forge" ] && [ "$LAST_RC" -eq 10 ] && verdict vrai "manifeste réécrit, signature d'origine : noyau jamais lancé (code 10)" || verdict faux "manifeste forgé : noyau jamais lancé" "$LAST_RC $LAST_OUT"
+# 10d. Crochet uninstall de la couche : lancé SEULEMENT avec une empreinte notée par l'amorce.
+I="$BASE/crochet-non-note"; faire_install "$I"; mkdir -p "$I/overlay/hooks"
+printf '#!/usr/bin/env bash\ntouch "%s"\n' "$BASE/pwned-crochet" > "$I/overlay/hooks/uninstall"
+lancer "$I"
+[ ! -e "$BASE/pwned-crochet" ] && verdict vrai "crochet sans empreinte notée : JAMAIS lancé" || verdict faux "crochet sans empreinte : jamais lancé" "$LAST_RC $LAST_OUT"
+[ "$LAST_RC" -eq 12 ] && verdict vrai "…et c'est dit par le code 12" || verdict faux "…code 12" "$LAST_RC $LAST_OUT"
+case "$LAST_OUT" in *"crochet uninstall"*"PAS été lancé"*) verdict vrai "…le bilan dit que ce que la couche a posé hors du dossier peut rester" ;; *) verdict faux "…le bilan nomme le crochet" "$LAST_OUT" ;; esac
+I="$BASE/crochet-note"; faire_install "$I"; mkdir -p "$I/overlay/hooks"
+printf '#!/usr/bin/env bash\ntouch "%s"\n' "$BASE/ok-crochet" > "$I/overlay/hooks/uninstall"
+note_ref "$I" overlay/hooks/uninstall
+lancer "$I"
+[ -e "$BASE/ok-crochet" ] && [ "$LAST_RC" -eq 0 ] && verdict vrai "crochet à l'empreinte notée : lancé (code 0)" || verdict faux "crochet noté : lancé" "$LAST_RC $LAST_OUT"
+I="$BASE/crochet-modifie"; faire_install "$I"; mkdir -p "$I/overlay/hooks"
+printf '#!/usr/bin/env bash\ntouch "%s"\n' "$BASE/ok-crochet-2" > "$I/overlay/hooks/uninstall"
+note_ref "$I" overlay/hooks/uninstall
+printf '#!/usr/bin/env bash\ntouch "%s"\n' "$BASE/pwned-crochet-2" > "$I/overlay/hooks/uninstall"   # remplacé après la notation
+lancer "$I"
+[ ! -e "$BASE/pwned-crochet-2" ] && [ ! -e "$BASE/ok-crochet-2" ] && [ "$LAST_RC" -eq 12 ] && verdict vrai "crochet remplacé après la notation : jamais lancé (code 12)" || verdict faux "crochet remplacé : jamais lancé" "$LAST_RC $LAST_OUT"
+if [ "$A_ANCIEN" = 1 ]; then
+  I="$BASE/crochet-ancien"; faire_install "$I"; mkdir -p "$I/overlay/hooks"
+  printf '#!/usr/bin/env bash\ntouch "%s"\n' "$BASE/pwned-crochet-ancien" > "$I/overlay/hooks/uninstall"
+  SCRIPT_SOUS_TEST="$ANCIEN" lancer "$I"
+  [ -e "$BASE/pwned-crochet-ancien" ] && verdict vrai "CONTRÔLE POSITIF : l'ANCIEN script lance le crochet sans empreinte" || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû lancer le crochet" "$LAST_RC $LAST_OUT"
+fi
+# 10e. Noyau de la COUCHE (overlay/gen/<nom>/bin/<plat>/baluchon-core) : même règle (empreinte notée), le public prend le relais.
+I="$BASE/noyau-couche-non-note"; faire_install "$I"
+mkdir -p "$I/overlay/gen/g1/bin/plat"; printf 'gen/g1\n' > "$I/overlay/CURRENT"
+noyau_temoin "$I/overlay/gen/g1/bin/plat/baluchon-core" "$BASE/pwned-noyau-couche"
+: > "$JOURNAL_NOYAU"
+lancer "$I"
+[ ! -e "$BASE/pwned-noyau-couche" ] && verdict vrai "noyau de couche sans empreinte notée : JAMAIS lancé" || verdict faux "noyau de couche : jamais lancé" "$LAST_RC $LAST_OUT"
+grep -q 'remote forget-access' "$JOURNAL_NOYAU" && [ "$LAST_RC" -eq 0 ] && verdict vrai "…le noyau public (authentique) fait le ménage à sa place (code 0)" || verdict faux "…le noyau public prend le relais" "$LAST_RC $(cat "$JOURNAL_NOYAU") $LAST_OUT"
+I="$BASE/noyau-couche-note"; faire_install "$I"
+mkdir -p "$I/overlay/gen/g1/bin/plat"; printf 'gen/g1\n' > "$I/overlay/CURRENT"
+noyau_temoin "$I/overlay/gen/g1/bin/plat/baluchon-core" "$BASE/ok-noyau-couche"
+note_ref "$I" overlay/gen/g1/bin/plat/baluchon-core
+lancer "$I"
+[ -e "$BASE/ok-noyau-couche" ] && verdict vrai "noyau de couche à l'empreinte notée : lancé" || verdict faux "noyau de couche noté : lancé" "$LAST_RC $LAST_OUT"
+
+echo "== 11. config est un LIEN : jamais suivi ; Trousseau : une erreur n'est pas une absence ; cache d'exécution =="
+# 11a. `config` mène à ~/Documents : l'ancien script y énumérait les profils et appelait le noyau/`security` sur eux.
+I="$BASE/config-lien"; faire_install "$I"
+rm -rf "$I/config"; ln -s "$H/Documents" "$I/config"
+: > "$JOURNAL_SECURITY"; : > "$JOURNAL_NOYAU"
+lancer "$I"
+[ "$LAST_RC" -eq 11 ] && verdict vrai "config est un lien : code 11" || verdict faux "config est un lien : code 11" "$LAST_RC $LAST_OUT"
+temoins_intacts && [ -f "$H/Documents/projet/a.txt" ] && verdict vrai "…les documents vers lesquels il mène sont INTACTS" || verdict faux "…les documents sont intacts"
+case "$LAST_OUT" in *"lien symbolique"*) verdict vrai "…le lien est SIGNALÉ" ;; *) verdict faux "…le lien est SIGNALÉ" "$LAST_OUT" ;; esac
+case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "…jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "…jamais « Plus aucune trace »" ;; esac
+! grep -q 'accounts purge' "$JOURNAL_NOYAU" && verdict vrai "…le noyau n'a reçu aucun ordre de purge à travers le lien" || verdict faux "…le noyau n'a reçu aucun ordre de purge" "$(cat "$JOURNAL_NOYAU")"
+if [ "$A_ANCIEN" = 1 ] && [ "$(uname -s)" = Darwin ]; then
+  I="$BASE/config-lien-ancien"; faire_install "$I"
+  rm -rf "$I/config"; ln -s "$H/Documents" "$I/config"
+  : > "$JOURNAL_SECURITY"; : > "$JOURNAL_NOYAU"
+  SCRIPT_SOUS_TEST="$ANCIEN" lancer "$I"
+  grep -q 'accounts purge' "$JOURNAL_NOYAU" && grep -q 'delete-generic-password' "$JOURNAL_SECURITY" && [ "$LAST_RC" -eq 0 ] \
+    && verdict vrai "CONTRÔLE POSITIF : l'ANCIEN script suivait le lien (purge et Trousseau sur ce qu'il désigne) et disait « tout va bien »" \
+    || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû suivre le lien" "$LAST_RC $(cat "$JOURNAL_NOYAU") $LAST_OUT"
+fi
+# 11b. Trousseau (macOS) : 0 et 44 = « il n'y en a plus » ; toute autre réponse n'établit RIEN.
+if [ "$(uname -s)" = Darwin ]; then
+  printf '36\n' > "$BASE/security-rc"
+  I="$BASE/trousseau-verrouille"; faire_install "$I"
+  lancer "$I"
+  [ "$LAST_RC" -eq 11 ] && verdict vrai "Trousseau qui répond 36 (verrouillé) : code 11, jamais pris pour une absence" || verdict faux "Trousseau verrouillé : code 11" "$LAST_RC $LAST_OUT"
+  case "$LAST_OUT" in *"ni son absence établie"*) verdict vrai "…le bilan dit que l'absence n'est pas établie" ;; *) verdict faux "…le bilan dit que l'absence n'est pas établie" "$LAST_OUT" ;; esac
+  case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "…jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "…jamais « Plus aucune trace »" ;; esac
+  if [ "$A_ANCIEN" = 1 ]; then
+    I="$BASE/trousseau-verrouille-ancien"; faire_install "$I"
+    SCRIPT_SOUS_TEST="$ANCIEN" lancer "$I"
+    case "$LAST_OUT" in *"Plus aucune trace"*) verdict vrai "CONTRÔLE POSITIF : l'ANCIEN script annonçait « Plus aucune trace » malgré un Trousseau illisible" ;; *) verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû mentir" "$LAST_RC $LAST_OUT" ;; esac
+  fi
+  printf '44\n' > "$BASE/security-rc"
+  I="$BASE/trousseau-absent"; faire_install "$I"
+  lancer "$I"
+  [ "$LAST_RC" -eq 0 ] && verdict vrai "Trousseau qui répond 44 (item absent) : c'est un succès (code 0)" || verdict faux "Trousseau 44 : code 0" "$LAST_RC $LAST_OUT"
+  rm -f "$BASE/security-rc"
+fi
+# 11c. Cache d'exécution : retiré avec ses bornes, jamais plus loin que sa base, jamais à travers un lien.
+I="$BASE/cache-ok"; faire_install "$I"
+mkdir -p "$H/.cache/baluchon/9.9.9/plat" "$H/.cache/baluchon/overlay-core/plat" "$H/.cache/autre-programme"
+printf 'copie\n' > "$H/.cache/baluchon/9.9.9/plat/claude"; printf 'a-moi-pas\n' > "$H/.cache/autre-programme/fichier"
+{ printf '%s\n' "$H/.cache/baluchon/9.9.9/plat" "$H/.cache/baluchon/overlay-core/plat" "$H/Documents" "$H/.cache/autre-programme" \
+    "$H/.cache/baluchon/../../Documents" "relatif/chemin" "$H/.cache/baluchon//9.9.9"; } > "$I/.baluchon-cache"
+lancer "$I"
+[ "$LAST_RC" -eq 0 ] && verdict vrai "cache d'exécution noté : code 0" || verdict faux "cache noté : code 0" "$LAST_RC $LAST_OUT"
+[ ! -e "$H/.cache/baluchon" ] && verdict vrai "…les copies notées ont disparu, leurs parents vides aussi (base comprise)" || verdict faux "…les copies notées ont disparu" "$(find "$H/.cache" 2>/dev/null)"
+[ "$(cat "$H/.cache/autre-programme/fichier" 2>/dev/null)" = a-moi-pas ] && temoins_intacts && [ -f "$H/Documents/projet/a.txt" ] && verdict vrai "…un autre programme de ~/.cache et les lignes hostiles (Documents, .., //) : rien de touché" || verdict faux "…rien d'autre n'est touché"
+I="$BASE/cache-lien"; faire_install "$I"
+mkdir -p "$H/.cache/baluchon/9.9.9"; ln -s "$H/Documents" "$H/.cache/baluchon/9.9.9/plat"
+printf '%s\n' "$H/.cache/baluchon/9.9.9/plat" > "$I/.baluchon-cache"
+lancer "$I"
+[ "$LAST_RC" -eq 12 ] && verdict vrai "cache = lien vers ~/Documents : code 12" || verdict faux "cache lien : code 12" "$LAST_RC $LAST_OUT"
+temoins_intacts && [ -f "$H/Documents/projet/a.txt" ] && verdict vrai "…les documents sont INTACTS" || verdict faux "…les documents sont intacts"
+case "$LAST_OUT" in *"Cache d'exécution NON effacé"*) verdict vrai "…le cache restant est NOMMÉ" ;; *) verdict faux "…le cache restant est NOMMÉ" "$LAST_OUT" ;; esac
+case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "…jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "…jamais « Plus aucune trace »" ;; esac
+rm -f "$H/.cache/baluchon/9.9.9/plat"   # un lien : ce `rm` ne suit rien
+if [ "$A_ANCIEN" = 1 ]; then
+  I="$BASE/cache-ancien"; faire_install "$I"
+  mkdir -p "$H/.cache/baluchon/9.9.9/plat"; printf 'copie\n' > "$H/.cache/baluchon/9.9.9/plat/claude"
+  printf '%s\n' "$H/.cache/baluchon/9.9.9/plat" > "$I/.baluchon-cache"
+  SCRIPT_SOUS_TEST="$ANCIEN" lancer "$I"
+  [ -e "$H/.cache/baluchon/9.9.9/plat/claude" ] && case "$LAST_OUT" in *"Plus aucune trace"*) true ;; *) false ;; esac \
+    && verdict vrai "CONTRÔLE POSITIF : l'ANCIEN script laissait le cache d'exécution ET disait « Plus aucune trace »" \
+    || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû laisser le cache" "$LAST_RC $LAST_OUT"
 fi
 
 echo

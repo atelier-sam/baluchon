@@ -56,6 +56,7 @@ ne_dit_pas() { if grep -qF -- "$2" "$T/out" 2>/dev/null; then verdict faux "$1" 
 read -r PLAT CORE_PLAT BINNAME < <(bash -c 'ROOT=/x; . "$1"; cc_detect_platform; echo "$PLAT $CORE_PLAT $BINNAME"' _ "$DEPOT/lib/common.sh")
 TIMEOUT="$(command -v timeout || command -v gtimeout || true)"
 REAL_CURL="$(command -v curl)"
+REAL_SHASUM="$(command -v shasum || true)"
 
 # ── La clé d'essai, et une copie de install.sh qui ne diffère que par la ligne du signataire ──────
 KEYS="$BASE/cles"; mkdir -p "$KEYS"
@@ -132,8 +133,10 @@ chmod +x "$FAUX"/gum "$FAUX"/curl "$FAUX"/noyau "$FAUX"/security "$FAUX/claude-s
 release() { # release <dossier> [sans-uninstall] [variante] : actifs + SHA256SUMS signé
   local r="$1" mode="${2:-}" variante="${3:-}"
   mkdir -p "$r"; rm -f "$r"/*
-  cp "$DEPOT/Claude.command" "$r/Claude.command"; cp "$DEPOT/lib/common.sh" "$r/common.sh"
-  [ "$mode" = sans-uninstall ] || cp "$DEPOT/uninstall.sh" "$r/uninstall.sh"
+  # La bibliothèque et le désinstalleur publiés portent EUX AUSSI la clé de l'essai : ce sont eux qui vérifient,
+  # plus tard, le manifeste signé que l'installation conserve (la vraie clé du produit n'a pas servi à signer ici).
+  cp "$DEPOT/Claude.command" "$r/Claude.command"; recle "$DEPOT/lib/common.sh" "$r/common.sh"
+  [ "$mode" = sans-uninstall ] || recle "$DEPOT/uninstall.sh" "$r/uninstall.sh"
   cp "$FAUX/noyau" "$r/baluchon-core-$CORE_PLAT"
   [ -z "$variante" ] || printf '\n# variante %s\n' "$variante" >> "$r/Claude.command"
   ( cd "$r" && shasum -a 256 -- * > "$BASE/SHA256SUMS.tmp" && mv "$BASE/SHA256SUMS.tmp" SHA256SUMS )
@@ -146,6 +149,10 @@ monde() { # monde <nom> [release-source]
   mkdir -p "$T/bin" "$T/tmp" "$CTL" "$H/.local/bin" "$DIR/tools/gum/$PLAT"
   cp "$FAUX/curl" "$FAUX/security" "$T/bin/"
   cp "$FAUX/gum" "$DIR/tools/gum/$PLAT/gum"; chmod +x "$DIR/tools/gum/$PLAT/gum"
+  # Le vrai gum est vérifié par l'empreinte épinglée de son archive, que l'essai ne peut pas reproduire (faux gum) :
+  # on note donc sa référence comme l'installeur le fait après cette vérification. Sans elle, un gum qu'aucune
+  # référence n'authentifie est retiré (c'est la règle, éprouvée plus bas).
+  printf '%s  tools/gum/%s/gum\n' "$(shasum -a 256 "$DIR/tools/gum/$PLAT/gum" | cut -d' ' -f1)" "$PLAT" > "$DIR/.baluchon-refs"
   : > "$CTL/choix"; : > "$CTL/confirm-rc"; : > "$CTL/menus"; : > "$T/tty"
 }
 # Joue un installeur dans le monde courant. $1 = install.sh à jouer ; les suivants = variables d'environnement.
@@ -153,7 +160,7 @@ joue() {
   local script="$1"; shift
   RC=0; : > "$T/curl.log"; rm -f "$T/etat"
   ( cd "$H" && ${TIMEOUT:+"$TIMEOUT" 300} env -i HOME="$H" PATH="$T/bin:/usr/bin:/bin" TERM=dumb TMPDIR="$T/tmp" \
-      BALUCHON_DIR="$DIR" CCP_DL="file://$REL" CURL_LOG="$T/curl.log" FAKE_CLAUDE="$FAUX/claude-stable" REAL_CURL="$REAL_CURL" \
+      BALUCHON_DIR="$DIR" CCP_DL="file://$REL" CURL_LOG="$T/curl.log" FAKE_CLAUDE="$FAUX/claude-stable" REAL_CURL="$REAL_CURL" REAL_SHASUM="$REAL_SHASUM" \
       GUM_CTL="$CTL" CC_TTY="$T/tty" BALUCHON_ETAT_SORTIE="$T/etat" "$@" bash "$script" < /dev/null > "$T/out" 2>&1 ) || RC=$?
 }
 choix() { printf '%s\n' "$@" > "$CTL/choix"; }
@@ -302,6 +309,96 @@ if git -C "$DEPOT" show c0172f7:install.sh > "$ANCIEN_BRUT" 2>/dev/null && [ -s 
 else
   echo "(!) historique git absent : le contrôle positif sur l'ancien install.sh (c0172f7) est sauté"
 fi
+
+# ── G. Rien n'est exécuté ni sourcé avant d'avoir été comparé à une empreinte authentifiée ─────
+# (revue Codex, 2e passe, HIGH 1 à 3 : la bibliothèque était hachée puis sourcée par son chemin ; « à jour »
+# se contentait de la PRÉSENCE de Claude et de gum ; le menu lançait ce qu'il trouvait.)
+# Un faux `shasum` joue l'attaque la plus étroite : une fois la bibliothèque contrôlée, il la REMPLACE dans
+# l'installation par une autre qui laisse un témoin si on l'exécute.
+cat > "$FAUX/shasum" <<'SHASUM'
+#!/usr/bin/env bash
+sortie="$("${REAL_SHASUM:?}" "$@")"; rc=$?
+printf '%s\n' "$sortie"
+if [ -e "${GUM_CTL:?}/piege-lib" ]; then
+  for a in "$@"; do
+    case "$a" in */lib/common.sh|*/lib-posee.sh)
+      rm -f "$GUM_CTL/piege-lib"
+      printf '#!/usr/bin/env bash\ntouch "%s"\n' "$GUM_CTL/pwned-lib" > "$BALUCHON_DIR/lib/common.sh.new"
+      mv -f "$BALUCHON_DIR/lib/common.sh.new" "$BALUCHON_DIR/lib/common.sh" ;;
+    esac
+  done
+fi
+exit "$rc"
+SHASUM
+chmod +x "$FAUX/shasum"
+mauvais() { printf '#!/usr/bin/env bash\ntouch "%s"\nexit 0\n' "$1"; }   # un exécutable qui laisse un témoin s'il tourne
+
+monde G
+joue "$INSTALL"
+cp "$FAUX/shasum" "$T/bin/"
+touch "$CTL/piege-lib"
+joue "$INSTALL"
+vrai_si "G1. bibliothèque remplacée APRÈS son contrôle : la version malveillante n'est JAMAIS exécutée" test ! -e "$CTL/pwned-lib"
+egal "G1. …l'installation n'est pas « à jour » (la bibliothèque posée ne correspond plus) : tout est refait" installe "$(etat)"
+vrai_si "G1. …et la bibliothèque posée est redevenue celle de la release" test "$(shasum -a 256 "$DIR/lib/common.sh" | cut -d' ' -f1)" = "$(shasum -a 256 "$BASE/release-a/common.sh" | cut -d' ' -f1)"
+
+# Contrôle positif : le MÊME piège, joué contre l'installeur d'avant ce correctif (1238b14), exécute la version malveillante.
+ANCIEN_G_BRUT="$BASE/install-avant-correctif-brut.sh"
+if git -C "$DEPOT" show 1238b14:install.sh > "$ANCIEN_G_BRUT" 2>/dev/null && [ -s "$ANCIEN_G_BRUT" ]; then
+  ANCIEN_G="$BASE/install-avant-correctif.sh"; recle "$ANCIEN_G_BRUT" "$ANCIEN_G"
+  monde G0
+  joue "$INSTALL"
+  cp "$FAUX/shasum" "$T/bin/"
+  touch "$CTL/piege-lib"
+  joue "$ANCIEN_G"
+  vrai_si "G1. CONTRÔLE POSITIF : l'ancien installeur EXÉCUTE la bibliothèque échangée (le piège fonctionne)" test -e "$CTL/pwned-lib"
+else
+  echo "(!) historique git absent : le contrôle positif de G1 (1238b14) est sauté"
+fi
+
+# G2. gum, puis Claude, remplacés SEULS dans une installation « à jour » : plus « à jour », rien n'est exécuté.
+monde G2
+joue "$INSTALL"
+egal "G2. (point de départ) installation faite puis « à jour »" a-jour "$( joue "$INSTALL"; etat )"
+mauvais "$CTL/pwned-gum" > "$DIR/tools/gum/$PLAT/gum"; chmod +x "$DIR/tools/gum/$PLAT/gum"
+joue "$INSTALL"
+egal "G2. gum remplacé seul : l'installation n'est plus « à jour »" installe "$(etat)"
+vrai_si "G2. …le gum remplacé n'a JAMAIS été exécuté" test ! -e "$CTL/pwned-gum"
+vrai_si "G2. …et il n'est plus là (retiré faute de référence, jamais gardé)" test ! -e "$DIR/tools/gum/$PLAT/gum" -o -z "$(grep -l pwned-gum "$DIR/tools/gum/$PLAT/gum" 2>/dev/null)"
+monde G3
+joue "$INSTALL"
+mauvais "$CTL/pwned-claude" > "$DIR/bin/$PLAT/$BINNAME"; chmod +x "$DIR/bin/$PLAT/$BINNAME"
+joue "$INSTALL"
+egal "G3. Claude remplacé seul : l'installation n'est plus « à jour »" installe "$(etat)"
+vrai_si "G3. …le binaire remplacé n'a JAMAIS été exécuté (pas même un --version)" test ! -e "$CTL/pwned-claude"
+egal "G3. …il est RETÉLÉCHARGÉ et revérifié (empreinte du manifeste)" "$CSHA" "$(shasum -a 256 "$DIR/bin/$PLAT/$BINNAME" | cut -d' ' -f1)"
+
+# G4. Le menu ne s'ouvre que sur une installation authentifiée : exécutable remplacé = refus dit, menu jamais lancé.
+ouvre() { # joue cc_open_menu sur l'installation courante (sans $2 : le manifeste signé que l'installation a conservé)
+  RC=0
+  env -i HOME="$H" PATH="$T/bin:/usr/bin:/bin" TERM=dumb TMPDIR="$T/tmp" GUM_CTL="$CTL" CC_TTY="$T/tty" \
+    bash -c 'ROOT="$1"; . "$ROOT/lib/common.sh"; cc_detect_platform; cc_open_menu "$ROOT/Claude.command"' _ "$DIR" < /dev/null > "$T/out" 2>&1 || RC=$?
+}
+monde G4
+joue "$INSTALL"; choix Quitter; ouvre
+egal "G4. (point de départ) installation intacte : le menu s'ouvre" 1 "$(nb_menus)"
+for cas in noyau desinstalleur menu gum manifeste; do
+  monde "G4-$cas"; joue "$INSTALL"; choix Quitter
+  case "$cas" in
+    noyau)         mauvais "$CTL/pwned-menu" > "$DIR/bin/$CORE_PLAT/baluchon-core" ;;
+    desinstalleur) mauvais "$CTL/pwned-menu" > "$DIR/uninstall.sh" ;;
+    menu)          mauvais "$CTL/pwned-menu" > "$DIR/Claude.command" ;;
+    gum)           mauvais "$CTL/pwned-menu" > "$DIR/tools/gum/$PLAT/gum" ;;
+    manifeste)     # un manifeste de l'attaquant (sommes de SES fichiers) sans signature valide
+                   mauvais "$CTL/pwned-menu" > "$DIR/Claude.command"
+                   ( cd "$DIR" && shasum -a 256 Claude.command > .baluchon-sums ) ;;
+  esac
+  chmod +x "$DIR/Claude.command" "$DIR/uninstall.sh" "$DIR/bin/$CORE_PLAT/baluchon-core" 2>/dev/null
+  ouvre
+  egal "G4. $cas remplacé : le menu est refusé (code 1)" 1 "$RC"
+  vrai_si "G4. $cas remplacé : rien n'a été exécuté" test ! -e "$CTL/pwned-menu"
+  dit "G4. $cas remplacé : le refus est DIT" "ne correspond plus à la release signée"
+done
 
 printf '%s ok, %s ko\n' "$OK" "$KO"
 [ "$KO" = 0 ]

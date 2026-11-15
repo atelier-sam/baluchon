@@ -110,6 +110,8 @@ launch() {
   clear 2>/dev/null || true
   cfg="$ROOT/config/$p"; cc_write_settings "$cfg"
   cc_log "=== lancement profil=$p ==="
+  # Le menu reste ouvert longtemps : l'empreinte du binaire est relue JUSTE avant de le lancer.
+  cc_bin_verifie || { bad "Le binaire Claude ne correspond plus à ce qui a été vérifié : rien n'est lancé."; sleep 3; return 1; }
   gum style --foreground "$ORANGE" --bold --margin "1 0 1 3" "▶  Compte « $p » — bypass ON — démarrage…   (/status dans Claude = vue native)"
   if [ -n "${CORE:-}" ]; then
     ccp_core run "$p" --claude "$BIN" -- --dangerously-skip-permissions; rc=$?
@@ -148,6 +150,7 @@ login_profile() {
   LOGIN_EMAIL=""
   mkdir -p "$cfg"; cc_write_settings "$cfg"
   note "Une page de connexion va s'ouvrir dans le navigateur.${want:+ Connecte-toi avec : $want}"
+  cc_bin_verifie || { bad "Le binaire Claude ne correspond plus à ce qui a été vérifié : connexion non lancée."; return 1; }
   if [ -n "${CORE:-}" ]; then ccp_core run "$name" --claude "$BIN" -- auth login
   else CLAUDE_CONFIG_DIR="$(cc_winpath "$cfg")" sub "$BIN" auth login; fi
   [ -n "${CORE:-}" ] && LOGIN_EMAIL="$(ccp_core accounts email "$name" 2>/dev/null | tr -d '\r\n')"

@@ -249,12 +249,38 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
   signé>`, `tag <étiquette informative>`. L'identité d'une release est l'empreinte de ses sommes
   signées, jamais un numéro de version (deux releases qui diffèrent d'un octet ne se confondent pas).
 - **À jour** (`cc_release_a_jour`, fail-closed) : marqueur d'installation valide, relevé qui porte
-  l'empreinte des sommes qu'on vient d'authentifier, chaque fichier posé (menu, bibliothèque,
-  désinstalleur, noyau) à l'empreinte que la release signe, binaire Claude, `VERSION` et `gum` présents.
-  `install.sh` ne joue la bibliothèque déjà posée que si son empreinte est celle des sommes signées :
-  jamais de code non vérifié pour décider. Un doute et tout est refait. À jour : rien n'est téléchargé
-  au-delà des deux fichiers de signature, les commandes manquantes sont reposées, la couche (crochet
-  `update`) n'est pas rejouée.
+  l'empreinte des sommes qu'on vient d'authentifier, manifeste signé conservé identique à ces sommes,
+  chaque fichier posé (menu, bibliothèque, désinstalleur, noyau) à l'empreinte que la release signe,
+  `VERSION` présent, et le binaire Claude ainsi que `gum` à l'empreinte NOTÉE à l'installation (voir
+  « Authentifier avant d'exécuter »). `install.sh` ne joue la bibliothèque déjà posée que si son
+  empreinte est celle des sommes signées, et seulement APRÈS en avoir pris une copie privée qu'il hache
+  puis source (jamais le fichier posé relu par son chemin : un remplacement entre le contrôle et la
+  lecture ne passe plus). Un doute et tout est refait. À jour : rien n'est téléchargé au-delà des deux
+  fichiers de signature, les commandes manquantes sont reposées, la couche (crochet `update`) n'est pas
+  rejouée.
+- **Authentifier avant d'exécuter** (revue Codex, 2e et 3e passes). Règle unique : aucun fichier n'est
+  exécuté, sourcé ni même sondé (`--version`, `--contract`) avant d'avoir été comparé à une empreinte
+  qu'une signature ou une vérification de l'installeur garantit.
+  - Le **manifeste signé** de la release (`SHA256SUMS` + `.sig`) est CONSERVÉ dans l'installation
+    (`.baluchon-sums`, `.baluchon-sums.sig`, copiés AVANT le relevé `.baluchon-release`). Chaque
+    lecture le revérifie, sur une copie privée, avec la clé épinglée (`CCP_SIGNER`) : un manifeste
+    réécrit par un tiers ne passe pas. Il authentifie le menu, la bibliothèque, le désinstalleur et
+    le noyau public.
+  - **`.baluchon-refs`** (une ligne `<sha256>  <chemin>`) note ce que le manifeste ne couvre pas :
+    le binaire Claude (téléchargé et vérifié par l'installeur auprès de l'éditeur), `gum`, et, côté
+    atelier, le noyau et les crochets de la couche (notés par l'amorce, qui seule connaît la clé de la
+    couche et en a vérifié les sommes signées). Un fichier absent de ces deux listes n'est pas lancé.
+  - `cc_open_menu` ne lance le menu que si `cc_installation_authentique` est vraie ; `Claude.command`
+    revérifie le binaire Claude (`cc_bin_verifie`) juste avant de le lancer ; le crochet de couche est
+    exécuté depuis une copie privée hachée ; le désinstalleur de même (voir « Partir »).
+  - **Honnêteté sur ce que cela couvre.** `.baluchon-refs` est écrit avec les droits de l'utilisateur :
+    il protège d'un fichier remplacé SEUL, pas de quelqu'un qui réécrit toute l'installation (qui n'a
+    de toute façon pas besoin de nos scripts pour agir sous ce compte). Le menu et les sources sont
+    lancés par leur chemin : il reste une fenêtre entre la vérification et l'exécution, plus étroite
+    qu'avant mais non nulle pour un attaquant qui écrit dans le dossier au bon instant. Une
+    installation d'avant cette règle n'a ni manifeste ni références : elle se ré-authentifie en
+    relançant le lien d'installation une fois ; en attendant, « Partir » refuse (code 14) et le dit.
+    Claude hors ligne sans référence notée : refus dit, jamais un lancement sur parole.
 - **Ouvrir le menu** : `BALUCHON_OUVRIR_MENU=1` (opt-in côté `install.sh`, dont le contrat seul est
   inchangé). `cc_open_menu` lance le menu en ENFANT (l'appelant a un ménage à faire ensuite), avec
   `BALUCHON_DEPUIS_LIEN=1`, sur `/dev/tty` (`CC_TTY` en essai) : avec `curl … | bash` l'entrée
@@ -265,24 +291,51 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
   forget-access --host` pour chacun, en plus de celui de `config/remote.conf` ; le fichier n'est retiré
   que si l'oubli a réussi, et un noyau absent avec des hôtes notés donne le code 10.
 - **« 🚪 Partir »** (`Claude.command`, macOS et Linux ; absent sans marqueur, sans désinstalleur ou sous
-  Windows) : confirmation `gum` (« Non, annuler » par défaut) puis `cc_depart`. Celui-ci vérifie d'abord
-  une COPIE temporaire de `uninstall.sh` (`cmp` + `bash -n`, sinon code 14 et rien n'est effacé), relève
-  ce qu'il faudra chercher (dossier et chemin canonique, items du Trousseau, hôtes Access), efface les
-  sessions (`cc_wipe`), sort du dossier (`cd /`), joue la copie du désinstalleur (une seule source des
-  gardes de chemin), puis **relit le disque** : le menu n'écrit « Rien ne reste sur cet ordinateur » que
-  si dossier, commandes, items du Trousseau et jetons Access sont réellement partis, sinon il liste le
-  reste. Codes : 0 rien ne reste, 14 rien fait, 2 / 10 / 11 / 12 ceux d'`uninstall.sh` ou de `cc_wipe`,
-  13 un reste que personne n'avait signalé. Aucun journal n'est écrit après l'effacement (il recréerait
-  le dossier). Sur un poste invité, « Partir » est en tête du menu.
+  Windows) : confirmation `gum` (« Non, annuler » par défaut) puis `cc_depart`. Celui-ci prend une
+  COPIE privée (dossier `700`) de `uninstall.sh` et exige que son empreinte soit celle du manifeste
+  SIGNÉ conservé (`uninstall.sh` y figure) puis `bash -n` ; sinon code 14, rien n'est effacé, et la
+  raison est dite (manifeste absent ou invalide, désinstalleur modifié, ou remplacé pendant que le menu
+  était ouvert). Il relève ensuite ce qu'il faudra chercher (dossier et chemin canonique, items du
+  Trousseau, hôtes Access, dossiers de cache), efface les sessions (`cc_wipe`), sort du dossier
+  (`cd /`), joue la copie du désinstalleur (une seule source des gardes de chemin), puis **relit le
+  disque** : le menu n'écrit « Rien ne reste sur cet ordinateur » que si dossier, commandes, items du
+  Trousseau, jetons Access et cache d'exécution sont réellement partis, sinon il liste le reste.
+  Codes : 0 rien ne reste, 14 rien fait, 2 / 10 / 11 / 12 ceux d'`uninstall.sh` ou de `cc_wipe`, 13 un
+  reste que personne n'avait signalé. Aucun journal n'est écrit après l'effacement (il recréerait le
+  dossier). Sur un poste invité, « Partir » est en tête du menu.
+  - **Niveau de confiance, dit en clair** : « Partir » fait confiance à ce que fait confiance le menu
+    lui-même, ni plus ni moins. Le désinstalleur est comparé au manifeste signé conservé, lequel est
+    vérifié avec la clé de la release ; quelqu'un qui peut réécrire toute l'installation (manifeste
+    signé compris, avec une signature valide) a déjà gagné. Ce qui est exclu : un désinstalleur
+    simplement remplacé, ou un manifeste réécrit sans la clé.
+  - **Liens jamais suivis** : avant toute suppression, la racine est jugée (`cc_racine_sure` : chemin
+    absolu et physique, ni `/`, ni le domicile, ni un parent du domicile, propriétaire = l'utilisateur).
+    Un `config` qui est un lien symbolique n'est ni énuméré ni purgé (le noyau et le repli ne le
+    suivent pas) : c'est dit, le code n'est jamais 0. Un profil lien est laissé en place et nommé. Les
+    suppressions partent d'un `cd -P` dans `config` et passent par des noms relatifs.
+  - **Trousseau** : `security` répond 0 (supprimé) ou 44 (l'item n'existait pas) ⇒ « plus rien » ; toute
+    autre réponse (Trousseau verrouillé, accès refusé, outil absent) n'établit RIEN : « sessions non
+    vérifiées », code non nul, jamais « Rien ne reste ».
+  - **Cache d'exécution** : sur une clé montée sans exécution, `${XDG_CACHE_HOME:-~/.cache}/baluchon`
+    reçoit des copies des binaires ; `.baluchon-cache` en note les dossiers. `cc_wipe`/`uninstall.sh`
+    ne retirent QUE ces dossiers, strictement sous la base, sans `..` ni `//`, vrais dossiers à
+    l'utilisateur, aucun composant lien, puis les parents devenus vides (jamais un parent non vide). Ce
+    qui ne tient pas ces bornes n'est jamais suivi ; ce qui reste est nommé (code 12).
 - **Épreuves** : `scripts/lien-unique.test.sh <dossier-vide-absolu>` (installeur contre une release
   locale signée avec une clé d'essai, faux `curl`/`gum`/`security`, HOME jetable : première
   installation, « à jour » sans téléchargement, relevé absent, fichier altéré, autre release,
   désinstalleur falsifié refusé, release sans désinstalleur, « Partir » de bout en bout, contrôle positif
-  sur l'ancien `install.sh`) et `scripts/depart.test.sh <dossier-vide-absolu>` (le vrai menu, la vraie
-  bibliothèque et le vrai désinstalleur : succès, jeton Access non effaçable, Trousseau refusé, noyau
-  menteur, annulation, désinstalleur illisible, lien symbolique, hôte noté, contrôle positif).
-- **Limite connue** : le cache `${XDG_CACHE_HOME:-~/.cache}/baluchon` (copie `noexec`) n'est pas traité
-  par « Partir ». Windows (`install.ps1`, menu) n'a pas encore cette chaîne.
+  sur l'ancien `install.sh`, bibliothèque ou binaire échangés entre le contrôle et la lecture, Claude ou
+  `gum` remplacés), `scripts/depart.test.sh <dossier-vide-absolu>` (le vrai menu, la vraie
+  bibliothèque et le vrai désinstalleur : succès, jeton Access non effaçable, Trousseau refusé ou
+  verrouillé, noyau menteur, annulation, désinstalleur illisible ou remplacé pendant le menu, manifeste
+  forgé, `config` lien, cache, lien symbolique, hôte noté, contrôles positifs),
+  `scripts/uninstall.test.sh` (refus de chemins, noyau et crochet jamais lancés sans empreinte
+  authentifiée, `config` lien, Trousseau verrouillé, cache) et `scripts/effacement.test.sh` (`cc_wipe`
+  et `cc_purge_sessions` : racines douteuses, `config` ou profil lien). Chaque épreuve nouvelle est
+  rejouée contre l'ancien code (lu dans l'historique git) et doit y échouer. Les essais posent une clé
+  de signature JETABLE à la place de celle du produit.
+- **Limite connue** : Windows (`install.ps1`, menu) n'a pas encore cette chaîne.
 
 ## Poste invité
 

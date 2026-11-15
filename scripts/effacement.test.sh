@@ -14,9 +14,13 @@
 #      répondrait « aucun Mac configuré » et réussirait sans rien effacer) ;
 #    - noyau absent alors qu'un Mac est configuré : code 10, remote.conf gardé ;
 #    - noyau absent sans Mac configuré : repli bash, code 0 ;
-#    - session encore ouverte (code 11 du noyau) : code 2.
+#    - session encore ouverte (code 11 du noyau) : code 2 ;
+#    - (revue Codex, 2e passe, HIGH 5) `config` ou un profil qui est un LIEN vers un dossier témoin n'est
+#      jamais suivi : témoin intact, lien laissé en place et signalé, code non nul ; une racine qui est le
+#      domicile, ou un chemin relatif, est refusée avant toute suppression.
 #  Contrôle positif : passer l'ANCIEN lib/common.sh en 2e argument doit faire échouer les
-#  épreuves « jetons restants » (il rendait 0 et effaçait remote.conf).
+#  épreuves « jetons restants » (il rendait 0 et effaçait remote.conf) et les épreuves 6 à 8 (il suivait
+#  le lien et effaçait le témoin).
 #  Sortie : « N ok, M ko » ; code 0 seulement si M = 0.
 # ============================================================
 # SC2016 : le petit `bash -c '...'` d'essai s'écrit volontairement entre apostrophes.
@@ -69,7 +73,7 @@ chmod +x "$FAUX"
 # Une racine de portable avec deux profils connectés et un Mac configuré.
 racine() { # racine <nom> -> chemin
   local r="$BASE/$1"
-  mkdir -p "$r/config/perso" "$r/config/pro" "$r/home"
+  mkdir -p "$r/config/perso" "$r/config/pro"
   printf '{"jeton":"faux"}\n' > "$r/config/perso/.credentials.json"
   printf '{"jeton":"faux"}\n' > "$r/config/pro/.credentials.json"
   printf 'host = mac.example.test\nuser = sam\n' > "$r/config/remote.conf"
@@ -78,8 +82,10 @@ racine() { # racine <nom> -> chemin
 }
 
 # Joue cc_wipe dans un bash propre. Écrit « code|note » ; $3 = noyau ("" = aucun).
-joue() { # joue <racine> <lib> <noyau>
-  env -i HOME="$1/home" PATH="/usr/bin:/bin" bash -c '
+joue() { # joue <racine> <lib> <noyau> [domicile]
+  # Le domicile d'essai est HORS de toute racine : une racine qui contient le domicile est refusée (cc_racine_sure).
+  mkdir -p "$BASE/domicile-essai"
+  env -i HOME="${4:-$BASE/domicile-essai}" PATH="/usr/bin:/bin" bash -c '
     ROOT="$1"; . "$2"; CORE="$3"
     rc=0; cc_wipe >/dev/null 2>&1 || rc=$?
     printf "%s|%s" "$rc" "${CC_WIPE_NOTE:-}"
@@ -119,6 +125,39 @@ egal "4. config/ vidé" "" "$(ls -A "$R/config")"
 R="$(racine session-ouverte)"; printf '11\n' > "$BASE/PURGE_RC"; printf '0\n' > "$BASE/FORGET_RC"
 o="$(joue "$R" "$LIB" "$FAUX")"
 egal "5. session ouverte : code 2" 2 "${o%%|*}"
+
+# 6) (revue Codex, 2e passe, HIGH 5) `config` est un LIEN vers un dossier qui n'est pas à nous : l'effacement le
+# suivait (`rm -rf "$ROOT"/config/*`) et supprimait les documents. Désormais : témoin intact, lien signalé.
+printf '0\n' > "$BASE/PURGE_RC"; printf '0\n' > "$BASE/FORGET_RC"
+T="$BASE/temoin-config"; mkdir -p "$T/sous"
+printf 'precieux\n' > "$T/these.txt"; printf 'precieux\n' > "$T/sous/notes.txt"
+R="$BASE/config-lien"; mkdir -p "$R"; ln -s "$T" "$R/config"
+o="$(joue "$R" "$LIB" "$FAUX")"
+temoin_ok() { [ "$(cat "$1/these.txt" 2>/dev/null)" = precieux ] && [ "$(cat "$1/sous/notes.txt" 2>/dev/null)" = precieux ]; }
+verdict "$(temoin_ok "$T" && echo vrai || echo faux)" "6. config lien : le dossier témoin est INTACT"
+verdict "$([ -L "$R/config" ] && echo vrai || echo faux)" "6. config lien : le lien est laissé en place, jamais suivi"
+case "${o#*|}" in *"lien symbolique"*) verdict vrai "6. config lien : la note le SIGNALE" ;; *) verdict faux "6. config lien : la note le SIGNALE" "${o#*|}" ;; esac
+[ "${o%%|*}" != 0 ] && verdict vrai "6. config lien : le code n'est pas 0" || verdict faux "6. config lien : le code n'est pas 0" "code ${o%%|*}"
+
+# 7) Un PROFIL qui est un lien : le profil ordinaire est effacé, le lien est signalé et jamais suivi.
+T2="$BASE/temoin-profil"; mkdir -p "$T2"; printf 'precieux\n' > "$T2/these.txt"; printf 'precieux\n' > "$T2/sous-notes.txt"
+R="$BASE/profil-lien"; mkdir -p "$R/config/perso"
+printf '{"jeton":"faux"}\n' > "$R/config/perso/.credentials.json"; ln -s "$T2" "$R/config/pro"
+o="$(joue "$R" "$LIB" "$FAUX")"
+verdict "$([ "$(cat "$T2/these.txt" 2>/dev/null)" = precieux ] && [ "$(cat "$T2/sous-notes.txt" 2>/dev/null)" = precieux ] && echo vrai || echo faux)" "7. profil lien : le dossier témoin est INTACT"
+verdict "$([ ! -e "$R/config/perso" ] && echo vrai || echo faux)" "7. profil lien : le profil ordinaire est effacé"
+case "${o#*|}" in *"config/pro"*) verdict vrai "7. profil lien : la note NOMME l'entrée" ;; *) verdict faux "7. profil lien : la note NOMME l'entrée" "${o#*|}" ;; esac
+[ "${o%%|*}" != 0 ] && verdict vrai "7. profil lien : le code n'est pas 0" || verdict faux "7. profil lien : le code n'est pas 0" "code ${o%%|*}"
+
+# 8) Racine douteuse : refusée AVANT toute suppression (le domicile lui-même, un chemin relatif).
+H8="$BASE/domicile-racine"; mkdir -p "$H8/config/p1"; printf 'precieux\n' > "$H8/config/p1/.credentials.json"
+o="$(joue "$H8" "$LIB" "$FAUX" "$H8")"
+egal "8. racine = domicile : refusée (code 1)" 1 "${o%%|*}"
+verdict "$([ -f "$H8/config/p1/.credentials.json" ] && echo vrai || echo faux)" "8. racine = domicile : rien n'est effacé"
+mkdir -p "$BASE/rel8/config/p1"; printf 'x\n' > "$BASE/rel8/config/p1/.credentials.json"
+o="$(cd "$BASE" && env -i HOME="$BASE/domicile-essai" PATH="/usr/bin:/bin" bash -c 'ROOT="rel8"; . "$1"; CORE="$2"; rc=0; cc_wipe >/dev/null 2>&1 || rc=$?; printf "%s" "$rc"' _ "$LIB" "$FAUX" 2>/dev/null)"
+egal "8. racine relative : refusée (code 1)" 1 "$o"
+verdict "$([ -f "$BASE/rel8/config/p1/.credentials.json" ] && echo vrai || echo faux)" "8. racine relative : rien n'est effacé"
 
 printf '%s ok, %s ko\n' "$OK" "$KO"
 [ "$KO" = 0 ]
