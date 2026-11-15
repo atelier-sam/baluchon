@@ -5,10 +5,10 @@
 | Pièce | Rôle |
 |---|---|
 | `Claude.command` | Interface seule (bash + `gum`). Mac/Linux, et Windows via le bash de Git portable. |
-| `lib/common.sh` | Plateforme, téléchargements vérifiés (fail-closed), mises à jour, choix du noyau, purge de repli. « Tout effacer » (`cc_wipe`) rend 0, 2 (session encore ouverte), 10 (jetons Cloudflare Access restés utilisables : `config/remote.conf` est alors gardé pour qu'une nouvelle tentative sache quel hôte oublier) ou 1, avec `CC_WIPE_NOTE` qui nomme ce qui reste ; le menu ne dit « ✓ Effacé » que sur 0. Épreuves : `scripts/effacement.test.sh <dossier-vide-absolu>`. |
+| `lib/common.sh` | Plateforme, téléchargements vérifiés (fail-closed), mises à jour, choix du noyau, purge de repli. « Tout effacer » (`cc_wipe`) rend 0, 2 (session encore ouverte), 10 (jetons Cloudflare Access restés utilisables, y compris ceux des hôtes notés dans `.baluchon-acces` : `config/remote.conf` et `.baluchon-acces` sont alors gardés pour qu'une nouvelle tentative sache quel hôte oublier) ou 1, avec `CC_WIPE_NOTE` qui nomme ce qui reste ; le menu ne dit « ✓ Effacé » que sur 0. Épreuves : `scripts/effacement.test.sh <dossier-vide-absolu>`. |
 | `core/` → `baluchon-core` | Noyau Rust : comptes, statut, forfait, quotas, lancement verrouillé, outils Windows, accès distant. Contrat CLI versionné (`baluchon-core --contract`). |
 | `claude.cmd` / `claude-classic.cmd` | Lanceurs Windows (wizard / repli 100 % batch). |
-| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install`) ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique), et tout dossier dont un ANCÊTRE peut être modifié par un autre utilisateur (écriture de groupe ou du monde sans bit sticky, propriétaire étranger). L'effacement part du dossier PARENT figé (identité périphérique:inode revérifiée, nom relatif) : un maillon échangé contre un lien après le jugement donne un refus. Un ménage incomplet (jetons Access, sessions du Trousseau, dossier non supprimé en entier) sort en code 10, 11 ou 12 avec un bilan qui nomme ce qui reste, jamais « Plus aucune trace ». Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
+| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs et `uninstall.sh` sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install` ; voir « Un seul lien chez le client ») ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique), et tout dossier dont un ANCÊTRE peut être modifié par un autre utilisateur (écriture de groupe ou du monde sans bit sticky, propriétaire étranger). L'effacement part du dossier PARENT figé (identité périphérique:inode revérifiée, nom relatif) : un maillon échangé contre un lien après le jugement donne un refus. Un ménage incomplet (jetons Access, sessions du Trousseau, dossier non supprimé en entier) sort en code 10, 11 ou 12 avec un bilan qui nomme ce qui reste, jamais « Plus aucune trace ». Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
 | `scripts/build-core.sh` | Compile `baluchon-core` pour darwin-arm64/x64, linux-x64/arm64 (musl statique), win32-x64 (zig + cargo-zigbuild). |
 | `scripts/release.sh` | Assemble la release à plat, `SHA256SUMS` signé, contre-vérifié avec la clé embarquée. |
 | `overlay/` | Optionnel. Une couche posée à côté du portable (voir « Couches »). Le portable n'y écrit jamais. |
@@ -237,6 +237,53 @@ les jetons Cloudflare Access (`remote forget-access`), puis supprime le dossier 
 - **Oublier l'accès** : `remote forget-access` efface (sans les lire) les jetons Cloudflare
   Access de l'hôte du profil dans `~/.cloudflared`. Appelé par `uninstall.sh`.
 
+## Un seul lien chez le client
+
+Un même lien installe, se reconnaît « déjà à jour », ouvre le menu et permet d'en partir. Les
+définitions de « installé », « à jour » et « ce qui reste » vivent une seule fois, dans le dernier
+bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dépôt privé) et
+`Claude.command`.
+
+- **Relevé de release `.baluchon-release`** (écrit EN DERNIER, après une installation ou une mise à
+  jour complète, via fichier temporaire + `mv`) : `baluchon-release 1`, `sums <sha256 du SHA256SUMS
+  signé>`, `tag <étiquette informative>`. L'identité d'une release est l'empreinte de ses sommes
+  signées, jamais un numéro de version (deux releases qui diffèrent d'un octet ne se confondent pas).
+- **À jour** (`cc_release_a_jour`, fail-closed) : marqueur d'installation valide, relevé qui porte
+  l'empreinte des sommes qu'on vient d'authentifier, chaque fichier posé (menu, bibliothèque,
+  désinstalleur, noyau) à l'empreinte que la release signe, binaire Claude, `VERSION` et `gum` présents.
+  `install.sh` ne joue la bibliothèque déjà posée que si son empreinte est celle des sommes signées :
+  jamais de code non vérifié pour décider. Un doute et tout est refait. À jour : rien n'est téléchargé
+  au-delà des deux fichiers de signature, les commandes manquantes sont reposées, la couche (crochet
+  `update`) n'est pas rejouée.
+- **Ouvrir le menu** : `BALUCHON_OUVRIR_MENU=1` (opt-in côté `install.sh`, dont le contrat seul est
+  inchangé). `cc_open_menu` lance le menu en ENFANT (l'appelant a un ménage à faire ensuite), avec
+  `BALUCHON_DEPUIS_LIEN=1`, sur `/dev/tty` (`CC_TTY` en essai) : avec `curl … | bash` l'entrée
+  standard est le script. Sans terminal, il dit la commande à taper et rend 0. `BALUCHON_ETAT_SORTIE`
+  (chemin d'un fichier) reçoit `installe` ou `a-jour`, pour l'amorce.
+- **`.baluchon-acces`** : un nom d'hôte par ligne (jamais un jeton), posé par l'amorce quand des jetons
+  Cloudflare Access ont pu rester sur la machine. `cc_wipe` et `uninstall.sh` appellent `remote
+  forget-access --host` pour chacun, en plus de celui de `config/remote.conf` ; le fichier n'est retiré
+  que si l'oubli a réussi, et un noyau absent avec des hôtes notés donne le code 10.
+- **« 🚪 Partir »** (`Claude.command`, macOS et Linux ; absent sans marqueur, sans désinstalleur ou sous
+  Windows) : confirmation `gum` (« Non, annuler » par défaut) puis `cc_depart`. Celui-ci vérifie d'abord
+  une COPIE temporaire de `uninstall.sh` (`cmp` + `bash -n`, sinon code 14 et rien n'est effacé), relève
+  ce qu'il faudra chercher (dossier et chemin canonique, items du Trousseau, hôtes Access), efface les
+  sessions (`cc_wipe`), sort du dossier (`cd /`), joue la copie du désinstalleur (une seule source des
+  gardes de chemin), puis **relit le disque** : le menu n'écrit « Rien ne reste sur cet ordinateur » que
+  si dossier, commandes, items du Trousseau et jetons Access sont réellement partis, sinon il liste le
+  reste. Codes : 0 rien ne reste, 14 rien fait, 2 / 10 / 11 / 12 ceux d'`uninstall.sh` ou de `cc_wipe`,
+  13 un reste que personne n'avait signalé. Aucun journal n'est écrit après l'effacement (il recréerait
+  le dossier). Sur un poste invité, « Partir » est en tête du menu.
+- **Épreuves** : `scripts/lien-unique.test.sh <dossier-vide-absolu>` (installeur contre une release
+  locale signée avec une clé d'essai, faux `curl`/`gum`/`security`, HOME jetable : première
+  installation, « à jour » sans téléchargement, relevé absent, fichier altéré, autre release,
+  désinstalleur falsifié refusé, release sans désinstalleur, « Partir » de bout en bout, contrôle positif
+  sur l'ancien `install.sh`) et `scripts/depart.test.sh <dossier-vide-absolu>` (le vrai menu, la vraie
+  bibliothèque et le vrai désinstalleur : succès, jeton Access non effaçable, Trousseau refusé, noyau
+  menteur, annulation, désinstalleur illisible, lien symbolique, hôte noté, contrôle positif).
+- **Limite connue** : le cache `${XDG_CACHE_HOME:-~/.cache}/baluchon` (copie `noexec`) n'est pas traité
+  par « Partir ». Windows (`install.ps1`, menu) n'a pas encore cette chaîne.
+
 ## Poste invité
 
 Le marqueur `config/.hosts/<hôte>` (`trusted` | `guest`) est demandé à la 1re
@@ -283,8 +330,9 @@ Les deux scripts servent à toute édition sans être copiés : `build-core.sh` 
 l'en-tête du script).
 
 Puis publier `dist/release/*` comme assets d'une release : les installeurs lisent
-`github.com/atelier-sam/baluchon/releases/latest/download/`. `install.sh` et `install.ps1`
-font partie des assets (donc des sommes signées) : un script qui doit lancer l'installeur
+`github.com/atelier-sam/baluchon/releases/latest/download/`. `install.sh`, `install.ps1` et
+`uninstall.sh` font partie des assets (donc des sommes signées ; `uninstall.sh` est toléré absent
+d'une ancienne release, l'installeur le dit et le menu ne propose alors pas « Partir ») : un script qui doit lancer l'installeur
 sans le télécharger depuis une branche le prend dans `releases/download/<tag>/`, vérifie
 `SHA256SUMS` contre la clé publique `baluchon-release` (`ssh-keygen -Y verify -n file`), puis
 contrôle l'empreinte de l'installeur, avant de l'exécuter. Garde de périmètre : l'identité

@@ -27,6 +27,17 @@ irm https://raw.githubusercontent.com/atelier-sam/baluchon/main/install.ps1 | ie
 
 Then: `baluchon` (wizard) — `baluchon1` (second account). `ccp` and `ccp1` remain as aliases.
 
+The same link does everything. Replayed on an installation that is already up to date (same
+signed release, every file intact), the installer downloads nothing: it says so, puts the
+commands back if they are missing, and stops. With `BALUCHON_OUVRIR_MENU=1` it then opens
+the menu (on the terminal, never on its own stream):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/atelier-sam/baluchon/main/install.sh | BALUCHON_OUVRIR_MENU=1 bash
+```
+
+With no terminal it does not fail: it prints the command to type.
+
 Everything comes from the repository's **latest signed release**: `SHA256SUMS` is signed
 (`ssh-keygen -Y`, key `baluchon-release`), every file is verified before it is put in place,
 the Claude binary is checked against Anthropic's official manifest, and `gum`, portable
@@ -36,6 +47,15 @@ installation.
 Everything is installed under `~/.baluchon` (sessions included).
 
 ## Uninstall
+
+From the menu (macOS / Linux): **"🚪 Partir : tout effacer et désinstaller"** (leave:
+erase everything and uninstall), with a confirmation ("Non, annuler" is the default). The
+menu erases the sessions, runs the verified uninstaller, then **re-reads the disk**: it
+says "Rien ne reste sur cet ordinateur" (nothing is left on this computer) only if the
+folder, the commands, the Keychain items and the Access tokens are really gone; otherwise
+it lists what remains. On a guest computer, "Partir" is at the top of the menu.
+
+Or without the menu:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/atelier-sam/baluchon/main/uninstall.sh | bash

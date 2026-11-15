@@ -27,6 +27,17 @@ irm https://raw.githubusercontent.com/atelier-sam/baluchon/main/install.ps1 | ie
 
 Puis : `baluchon` (wizard) — `baluchon1` (2e compte). `ccp` et `ccp1` restent des alias.
 
+Le même lien sert à tout. Rejoué sur une installation déjà à jour (même release signée,
+tous les fichiers intacts), l'installeur ne télécharge rien : il le dit, remet les commandes
+si elles manquent et s'arrête. Avec `BALUCHON_OUVRIR_MENU=1`, il ouvre ensuite le menu
+(sur le terminal, jamais sur son propre flux) :
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/atelier-sam/baluchon/main/install.sh | BALUCHON_OUVRIR_MENU=1 bash
+```
+
+Sans terminal, il ne fait pas d'erreur : il dit la commande à taper.
+
 Tout vient de la **dernière release signée** du dépôt : `SHA256SUMS` est signé
 (`ssh-keygen -Y`, clé `baluchon-release`), chaque fichier est vérifié avant d'être posé,
 le binaire Claude est vérifié contre le manifest officiel d'Anthropic, `gum`, Git
@@ -36,6 +47,15 @@ ratée **arrête** l'installation.
 Tout s'installe dans `~/.baluchon` (sessions comprises).
 
 ## Désinstaller
+
+Depuis le menu (macOS / Linux) : **« 🚪 Partir : tout effacer et désinstaller »**, avec une
+confirmation (« Non, annuler » par défaut). Le menu efface les sessions, lance le
+désinstalleur vérifié, puis **relit le disque** : il n'annonce « Rien ne reste sur cet
+ordinateur » que si le dossier, les commandes, les items du Trousseau et les jetons Access
+sont vraiment partis ; sinon il liste ce qui reste. Sur un poste invité, « Partir » est en
+tête du menu.
+
+Ou sans menu :
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/atelier-sam/baluchon/main/uninstall.sh | bash
