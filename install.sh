@@ -134,7 +134,14 @@ installer_complet() {
   fi
 
   # 3) Noyau baluchon-core de cette plateforme
-  fetch "baluchon-core-$CORE_PLAT" "$DIR/bin/$CORE_PLAT/baluchon-core"; chmod +x "$DIR/bin/$CORE_PLAT/baluchon-core"
+  # ($EXE = « .exe » sous Windows : install.ps1 pose Git portable puis lance CE script avec son bash, pour qu'une
+  # seule chaîne de confiance serve les deux systèmes.)
+  fetch "baluchon-core-$CORE_PLAT$EXE" "$DIR/bin/$CORE_PLAT/baluchon-core$EXE"; chmod +x "$DIR/bin/$CORE_PLAT/baluchon-core$EXE"
+  if [ "$CC_OS" = win32 ]; then
+    # Lanceurs Windows (double-clic, commandes .cmd) : vérifiés comme le reste.
+    fetch claude.cmd "$DIR/claude.cmd"
+    fetch claude-classic.cmd "$DIR/claude-classic.cmd"
+  fi
   ok "Wizard + noyau baluchon-core vérifiés"
 
   # 4) Claude (canal stable, vérifié contre le manifest Anthropic) + gum (empreinte épinglée)
@@ -212,6 +219,9 @@ installer() {
     # « Partir » a pu tout effacer : plus rien à annoncer, et le code de sortie dit ce qui reste.
     if ! cc_est_installation "$DIR"; then exit "$menu_rc"; fi
   fi
+
+  # Sous Windows, install.ps1 pose les commandes .cmd, règle le PATH et dit lui-même la suite.
+  [ "$CC_OS" != win32 ] || exit "$menu_rc"
 
   case ":$PATH:" in
     *":$BINDIR:"*) ok "Tout est prêt. Tape :  baluchon" ;;

@@ -514,6 +514,16 @@ for n in baluchon baluchon1 ccp ccp1; do
     rm -f "$f"
   fi
 done
+# Windows : install.ps1 pose aussi baluchon.cmd… qui appellent « <dossier en chemin Windows>\claude.cmd ».
+if command -v cygpath >/dev/null 2>&1; then
+  for n in baluchon baluchon1 ccp ccp1; do
+    f="$BINDIR/$n.cmd"
+    [ -f "$f" ] || continue
+    for p in "$DIR" "${DIR_DEMANDE%/}"; do
+      if grep -qiF "$(cygpath -w "$p" 2>/dev/null)\\claude.cmd" "$f" 2>/dev/null; then rm -f "$f"; break; fi
+    done
+  done
+fi
 
 if [ "$CODE_SORTIE" = 0 ]; then
   echo "✓ Désinstallé. Plus aucune trace de Baluchon sur cette machine."

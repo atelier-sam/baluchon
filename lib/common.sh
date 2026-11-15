@@ -1243,6 +1243,14 @@ cc_depart_verifie() {
       [ -n "$p" ] || continue
       if grep -qF "$p/Claude.command" "$f" 2>/dev/null; then lignes="${lignes}La commande $f lance encore Baluchon.$nl"; break; fi
     done <<< "$CC_DEP_DIRS"
+    # Windows : les .cmd d'install.ps1 appellent « <dossier en chemin Windows>\claude.cmd ».
+    f="$HOME/.local/bin/$n.cmd"
+    if [ -f "$f" ] && command -v cygpath >/dev/null 2>&1; then
+      while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if grep -qiF "$(cygpath -w "$p" 2>/dev/null)\\claude.cmd" "$f" 2>/dev/null; then lignes="${lignes}La commande $f lance encore Baluchon.$nl"; break; fi
+      done <<< "$CC_DEP_DIRS"
+    fi
   done
   if [ "${CC_OS:-}" = darwin ] && [ -n "$CC_DEP_SERVICES" ]; then
     # 0 = l'item est là ; 44 = il n'existe pas. Toute autre réponse (Trousseau verrouillé, accès refusé, outil
