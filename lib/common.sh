@@ -120,6 +120,36 @@ cc_check_sha() {
   [ "$got" = "$want" ] || { cc_warn "Empreinte invalide pour $(basename "$f")."; return 1; }
 }
 
+# ─── Écriture atomique qui ne suit jamais un lien ────────────────────────────────────────────
+# cc_ecrire <destination> : écrit l'ENTRÉE STANDARD dans <destination>, par un fichier temporaire du MÊME dossier
+# puis un renommage. WHY (revue Codex, 4e passe) : `cp src dst.new && mv dst.new dst` écrivait dans un nom
+# PRÉVISIBLE ; qui pouvait écrire dans le dossier y posait `dst.new -> ~/Documents/these.txt`, `cp` suivait le
+# lien et écrasait le document, puis `mv` posait le lien sur `dst`. Ici :
+#   - le nom du temporaire est imprévisible ($$ + trois $RANDOM) ;
+#   - il est ouvert en O_EXCL (`set -C` : le shell refuse d'ouvrir un fichier ou un lien qui existe déjà, même
+#     pendant), et les octets partent par CE descripteur : le chemin n'est pas rouvert après sa création ;
+#   - rien n'est écrit dans <destination> : `mv` la REMPLACE (si c'est un lien, c'est le lien qui disparaît) ;
+#   - un dossier à la place de <destination> est refusé (`mv` y descendrait le fichier).
+# Droits du fichier créé : ceux du umask de l'appelant, comme un `>` ordinaire (les exécutables reçoivent leur
+# `chmod +x` après coup). Limite assumée : un autre compte qui peut écrire dans le dossier ET qui lit le nom du
+# temporaire pendant sa courte vie pourrait encore l'échanger ; il faudrait openat/renameat (Rust). Ce qui est
+# fermé : le lien posé d'avance à un nom que l'on peut deviner.
+# Rend 1 sans rien laisser derrière lui si quoi que ce soit échoue.
+cc_ecrire() {
+  local dst="$1" d tmp rc
+  case "$dst" in */*) d="${dst%/*}"; [ -n "$d" ] || d=/ ;; *) d=. ;; esac
+  [ -d "$d" ] && [ ! -d "$dst" ] || return 1
+  tmp="$d/.baluchon-pose.$$.$RANDOM$RANDOM$RANDOM"
+  # 97 = l'ouverture O_EXCL a échoué : le fichier n'est pas à nous, on n'y touche pas.
+  rc=0; ( set -C; exec 3> "$tmp" || exit 97; cat >&3 ) 2>/dev/null || rc=$?
+  [ "$rc" != 97 ] || return 1
+  if [ "$rc" = 0 ] && mv -f -- "$tmp" "$dst" 2>/dev/null; then return 0; fi
+  rm -f -- "$tmp"
+  return 1
+}
+# cc_poser <source> <destination> : cc_ecrire du contenu d'un fichier ordinaire.
+cc_poser() { [ -f "$1" ] || return 1; cc_ecrire "$2" < "$1"; }
+
 # ─── Références authentifiées ───────────────────────────────────────────────────────────────
 # RÈGLE (revue Codex, 2e passe) : aucun octet n'est exécuté, ni même sondé (`--version`, `--contract`,
 # `about` sont des exécutions), avant d'avoir été comparé à une empreinte AUTHENTIFIÉE, sur une installation
@@ -144,18 +174,18 @@ cc_ref_get() {
 }
 # Note l'empreinte $2 (64 hexadécimaux) de $1, en remplaçant l'ancienne ; écriture atomique.
 cc_ref_set() {
-  local f="$ROOT/.baluchon-refs" t
+  local f="$ROOT/.baluchon-refs" old=""
   case "$2" in ''|*[!0-9a-f]*) return 1 ;; esac
   [ "${#2}" = 64 ] || return 1
-  t="$f.$$"
-  { if [ -f "$f" ] && [ ! -L "$f" ]; then awk -v p="$1" '$2!=p' "$f"; fi; printf '%s  %s\n' "$2" "$1"; } > "$t" 2>/dev/null \
-    && mv -f "$t" "$f" || { rm -f "$t"; return 1; }
+  if [ -f "$f" ] && [ ! -L "$f" ]; then old="$(awk -v p="$1" '$2!=p' "$f" 2>/dev/null)" || return 1; fi
+  # cc_ecrire : jamais d'écriture à un nom prévisible (un `.baluchon-refs.<pid>` lié ailleurs était suivi).
+  { [ -z "$old" ] || printf '%s\n' "$old"; printf '%s  %s\n' "$2" "$1"; } | cc_ecrire "$f"
 }
 cc_ref_drop() {
-  local f="$ROOT/.baluchon-refs" t
+  local f="$ROOT/.baluchon-refs" old
   [ -f "$f" ] && [ ! -L "$f" ] || return 0
-  t="$f.$$"
-  awk -v p="$1" '$2!=p' "$f" > "$t" 2>/dev/null && mv -f "$t" "$f" || { rm -f "$t"; return 1; }
+  old="$(awk -v p="$1" '$2!=p' "$f" 2>/dev/null)" || return 1
+  { [ -z "$old" ] || printf '%s\n' "$old"; } | cc_ecrire "$f"
 }
 # Déplace la note de $1 vers $2 (le fichier vient d'être renommé) ; sans note pour $1, $2 n'en a plus.
 cc_ref_move() {
@@ -229,18 +259,25 @@ cc_manifest_sha() {
 
 # Télécharge le binaire d'une plateforme et vérifie le SHA256 du manifest officiel.
 cc_download_binary() {
-  local plat="$1" binname="$2" ver dir out manifest sha tmp
+  local plat="$1" binname="$2" ver dir out manifest sha w
   ver="$(tr -d ' \r\n' < "$ROOT/VERSION" 2>/dev/null)"; [ -n "$ver" ] || ver=stable
   [ "$ver" = stable ] && ver="$(curl -fsSL "$CC_RELEASES/stable")"
   [ -n "$ver" ] || cc_die "Version de Claude introuvable (pas de réseau ?)"
-  dir="$ROOT/bin/$plat"; mkdir -p "$dir"; out="$dir/$binname"; tmp="$dir/.$binname.part"
+  dir="$ROOT/bin/$plat"; mkdir -p "$dir"; out="$dir/$binname"
+  # Téléchargé ET vérifié dans un dossier PRIVÉ (0700) : le nom `.claude.part` posé d'avance dans bin/<plat>
+  # (un lien vers un document) était suivi par curl. Le binaire n'entre dans l'installation que vérifié,
+  # par cc_poser (renommage, jamais d'écriture dans un nom connu), puis son empreinte est revérifiée posé.
+  w="$(mktemp -d)" || cc_die "Dossier temporaire impossible."
   cc_info "Téléchargement de Claude Code $ver pour $plat ..."
-  manifest="$(curl -fsSL "$CC_RELEASES/$ver/manifest.json")" || cc_die "Manifest injoignable (pas de réseau ?)"
+  manifest="$(curl -fsSL "$CC_RELEASES/$ver/manifest.json")" || { rm -rf "$w"; cc_die "Manifest injoignable (pas de réseau ?)"; }
   sha="$(cc_manifest_sha "$manifest" "$plat")"
-  curl -fsSL "$CC_RELEASES/$ver/$plat/$binname" -o "$tmp" || { rm -f "$tmp"; cc_die "Téléchargement échoué pour $plat"; }
-  cc_check_sha "$tmp" "$sha" || { rm -f "$tmp"; cc_die "Binaire $plat non vérifié : refusé."; }
-  mv -f "$tmp" "$out"; chmod +x "$out" 2>/dev/null || true
-  printf '%s' "$ver" > "$ROOT/VERSION"
+  curl -fsSL "$CC_RELEASES/$ver/$plat/$binname" -o "$w/$binname" || { rm -rf "$w"; cc_die "Téléchargement échoué pour $plat"; }
+  cc_check_sha "$w/$binname" "$sha" || { rm -rf "$w"; cc_die "Binaire $plat non vérifié : refusé."; }
+  cc_poser "$w/$binname" "$out" || { rm -rf "$w"; cc_die "Pose de $binname impossible ($out)."; }
+  rm -rf "$w"
+  [ "$(cc_sha256 "$out")" = "$sha" ] || { rm -f "$out"; cc_die "Binaire $plat modifié pendant sa pose : refusé."; }
+  chmod +x "$out" 2>/dev/null || true
+  printf '%s' "$ver" | cc_ecrire "$ROOT/VERSION" || cc_warn "VERSION non écrite."
   # La référence authentifiée : l'empreinte que le manifeste officiel vient de confirmer (cc_check_sha).
   cc_ref_set "bin/$plat/$binname" "$sha" || cc_warn "Référence de $binname non notée : elle sera revérifiée au prochain lancement."
   cc_ok "Claude $ver ($plat) vérifié (SHA256 OK)"
@@ -253,7 +290,8 @@ cc_cache_noter() {
   cc_strict || return 0
   [ ! -L "$f" ] || return 0
   if [ -f "$f" ] && grep -qxF -- "$1" "$f" 2>/dev/null; then return 0; fi
-  printf '%s\n' "$1" >> "$f" 2>/dev/null || true
+  # Ajout par réécriture atomique (jamais un `>>` sur un nom que quelqu'un a pu lier ailleurs).
+  { if [ -f "$f" ]; then cat "$f"; fi; printf '%s\n' "$1"; } 2>/dev/null | cc_ecrire "$f" || true
 }
 
 # Rend exécutable un binaire du portable ; sur une clé exFAT montée noexec,
@@ -344,7 +382,7 @@ JSON
 
 # ─── Interface gum ──────────────────────────────────────────────────────
 cc_ensure_gum() {
-  local g="$ROOT/tools/gum/$PLAT/gum$EXE" os arch tmp b asset rel="tools/gum/$PLAT/gum$EXE"
+  local g="$ROOT/tools/gum/$PLAT/gum$EXE" os arch tmp b asset h rel="tools/gum/$PLAT/gum$EXE"
   CC_GUM="$g"
   if [ -f "$g" ]; then
     # Sur une installation, gum n'est gardé que s'il a l'empreinte notée quand son archive a été vérifiée
@@ -359,21 +397,38 @@ cc_ensure_gum() {
   mkdir -p "$ROOT/tools/gum/$PLAT"
   tmp="$(mktemp -d)"
   cc_info "Téléchargement de l'interface gum ($CC_GUM_VER, $PLAT)…"
+  # TOUT se passe dans le dossier privé $tmp (0700) : l'archive est vérifiée, le binaire en est extrait, et c'est
+  # SUR CE BINAIRE EXTRAIT que l'empreinte de référence est calculée (revue Codex, 4e passe : elle l'était sur
+  # $g déjà posé dans l'installation, qu'un autre processus pouvait avoir remplacé entre la copie et le calcul,
+  # et l'installeur notait alors lui-même l'empreinte du faux). Le binaire est ensuite posé par renommage
+  # (cc_poser) et le fichier POSÉ doit avoir exactement l'empreinte calculée, sinon il est retiré.
+  b=""
   if [ "$CC_OS" = win32 ]; then
     asset="gum_${CC_GUM_VER}_${os}_${arch}.zip"
-    curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${CC_GUM_VER}/$asset" -o "$tmp/g.zip" \
+    mkdir -p "$tmp/x" \
+      && curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${CC_GUM_VER}/$asset" -o "$tmp/g.zip" \
       && cc_check_sha "$tmp/g.zip" "$(cc_gum_sha "${os}_${arch}")" \
-      && ( cd "$ROOT/tools/gum/$PLAT" && unzip -o -j "$tmp/g.zip" '*gum.exe' >/dev/null 2>&1 ) \
-      && cc_ref_set "$rel" "$(cc_sha256 "$g")"
+      && ( cd "$tmp/x" && unzip -o -j "$tmp/g.zip" '*gum.exe' >/dev/null 2>&1 ) \
+      && b="$tmp/x/gum.exe" && [ -f "$b" ] || b=""
   else
     asset="gum_${CC_GUM_VER}_${os}_${arch}.tar.gz"
     curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${CC_GUM_VER}/$asset" -o "$tmp/g.tgz" \
       && cc_check_sha "$tmp/g.tgz" "$(cc_gum_sha "${os}_${arch}")" \
-      && tar xzf "$tmp/g.tgz" -C "$tmp" && b="$(find "$tmp" -type f -name gum | head -1)" && [ -n "$b" ] && cp "$b" "$g" && chmod +x "$g" \
-      && cc_ref_set "$rel" "$(cc_sha256 "$g")"
+      && tar xzf "$tmp/g.tgz" -C "$tmp" && b="$(find "$tmp" -type f -name gum | head -1)" && [ -n "$b" ] || b=""
+  fi
+  if [ -n "$b" ]; then
+    h="$(cc_sha256 "$b")"
+    if [ -n "$h" ] && cc_poser "$b" "$g" && chmod +x "$g" && [ "$(cc_sha256 "$g")" = "$h" ]; then
+      cc_ref_set "$rel" "$h" || { rm -f "$g"; b=""; }
+    else
+      rm -f "$g"; b=""
+    fi
   fi
   rm -rf "$tmp"
-  [ -f "$CC_GUM" ]
+  [ -n "$b" ] || return 1
+  # Sur une installation, gum n'est jamais « présent donc bon » : un gum recréé pendant que le téléchargement
+  # échouait (ou posé d'avance) n'a pas l'empreinte notée, donc n'est pas accepté.
+  if cc_strict; then cc_ref_ok "$rel"; else [ -f "$CC_GUM" ]; fi
 }
 
 # ─── Noyau baluchon-core ─────────────────────────────────────────────────────
@@ -388,8 +443,10 @@ cc_download_core() {
     sha="$(cc_sum_for "$w/SHA256SUMS" "$name")"
     if cc_check_sha "$w/$name" "$sha"; then
       mkdir -p "$ROOT/bin/$CORE_PLAT"
-      mv -f "$w/$name" "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE"; chmod +x "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" 2>/dev/null || true
-      rm -rf "$w"; cc_ok "Noyau baluchon-core vérifié (signature + SHA256)"; return 0
+      if cc_poser "$w/$name" "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" && [ "$(cc_sha256 "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE")" = "$sha" ]; then
+        chmod +x "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" 2>/dev/null || true
+        rm -rf "$w"; cc_ok "Noyau baluchon-core vérifié (signature + SHA256)"; return 0
+      fi
     fi
   fi
   rm -rf "$w"; return 1
@@ -570,7 +627,7 @@ cc_claude_stable_cached() {
   if [ -f "$f" ]; then age=$(( now - $(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0) )); else age=999999; fi
   if [ "$age" -gt 86400 ]; then
     v="$(curl -fsSL -m 4 "$CC_RELEASES/stable" 2>/dev/null | tr -d ' \r\n')"
-    [ -n "$v" ] && printf '%s' "$v" > "$f"
+    if [ -n "$v" ]; then printf '%s' "$v" | cc_ecrire "$f" 2>/dev/null || true; fi
   fi
   tr -d ' \r\n' < "$f" 2>/dev/null
 }
@@ -579,7 +636,7 @@ cc_claude_stable_cached() {
 # clé), en gardant la version précédente (claude.prev) pour revenir en arrière.
 # $1 = canal (stable/latest)
 cc_update() {
-  local channel="${1:-stable}" ver manifest plat binname sha tmp dst old here_ok=0
+  local channel="${1:-stable}" ver manifest plat binname sha tmp dst old here_ok=0 placed
   local plats=()
   old="$(tr -d ' \r\n' < "$ROOT/VERSION" 2>/dev/null)"
   ver="$(curl -fsSL "$CC_RELEASES/$channel")" || { cc_warn "Pas de réseau."; return 1; }
@@ -593,28 +650,34 @@ cc_update() {
   for plat in "${plats[@]}"; do
     binname=claude; case "$plat" in win32-*) binname=claude.exe ;; esac
     sha="$(cc_manifest_sha "$manifest" "$plat")"
-    dst="$ROOT/bin/$plat/$binname"; tmp="$ROOT/bin/$plat/.$binname.new"
+    # Téléchargé et vérifié dans un dossier PRIVÉ, posé par renommage (cc_poser) : un `.claude.new` lié d'avance
+    # dans bin/<plat> n'est plus un chemin d'écriture (revue Codex, 4e passe).
+    dst="$ROOT/bin/$plat/$binname"; tmp="$(mktemp -d)" || { cc_warn "$plat : dossier temporaire impossible."; continue; }
     cc_info "MAJ $plat ..."
-    if curl -fsSL "$CC_RELEASES/$ver/$plat/$binname" -o "$tmp" && cc_check_sha "$tmp" "$sha"; then
-      [ -f "$dst" ] && mv -f "$dst" "$dst.prev" && printf '%s' "${old:-?}" > "$ROOT/bin/$plat/.prev-version" \
+    if curl -fsSL "$CC_RELEASES/$ver/$plat/$binname" -o "$tmp/$binname" && cc_check_sha "$tmp/$binname" "$sha"; then
+      [ -f "$dst" ] && mv -f "$dst" "$dst.prev" && { printf '%s' "${old:-?}" | cc_ecrire "$ROOT/bin/$plat/.prev-version" || true; } \
         && cc_ref_move "bin/$plat/$binname" "bin/$plat/$binname.prev"
-      if mv -f "$tmp" "$dst"; then
+      placed=0; cc_poser "$tmp/$binname" "$dst" && placed=1
+      if [ "$placed" = 1 ] && [ "$(cc_sha256 "$dst")" = "$sha" ]; then
+        rm -rf "$tmp"
         chmod +x "$dst" 2>/dev/null || true; cc_ok "$plat à jour ($ver)"
         # L'empreinte que le manifeste officiel vient de confirmer devient la référence du nouveau binaire.
         cc_ref_set "bin/$plat/$binname" "$sha" || cc_warn "Référence de $plat non notée : elle sera revérifiée au prochain lancement."
         [ "$plat" = "$PLAT" ] && here_ok=1
       else
+        # Un binaire posé qui n'a pas l'empreinte vérifiée (échangé pendant la pose) ne reste jamais.
+        [ "$placed" != 1 ] || rm -f "$dst"
         # Remise en place de l'ancien binaire : jamais de plateforme sans claude.
         if [ -f "$dst.prev" ] && [ ! -f "$dst" ] && mv -f "$dst.prev" "$dst"; then cc_ref_move "bin/$plat/$binname.prev" "bin/$plat/$binname"; fi
-        rm -f "$tmp"; cc_warn "$plat : installation impossible, ancienne version conservée."
+        rm -rf "$tmp"; cc_warn "$plat : installation impossible, ancienne version conservée."
       fi
-    else rm -f "$tmp"; cc_warn "$plat : échec ou empreinte invalide, ancienne version conservée."; fi
+    else rm -rf "$tmp"; cc_warn "$plat : échec ou empreinte invalide, ancienne version conservée."; fi
   done
   # VERSION décrit le binaire de CETTE plateforme : on ne l'avance que s'il a
   # réellement été remplacé (sinon le bandeau « mise à jour disponible » disparaît
   # alors que l'ancien binaire tourne toujours).
   [ "$here_ok" = 1 ] || { cc_warn "Claude n'a pas été mis à jour sur $PLAT (version ${old:-?} conservée)."; return 1; }
-  printf '%s' "$ver" > "$ROOT/VERSION"
+  printf '%s' "$ver" | cc_ecrire "$ROOT/VERSION" || cc_warn "VERSION non écrite."
   rm -f "$ROOT/.cache/claude-stable"
   cc_ok "Claude = $ver"
 }
@@ -629,7 +692,7 @@ cc_rollback() {
   # Les références suivent les fichiers : chacune reste attachée au binaire qu'elle a authentifié.
   if [ -n "$rb" ]; then cc_ref_set "$rel" "$rb" || true; else cc_ref_drop "$rel" || true; fi
   if [ -n "$ra" ]; then cc_ref_set "$rel.prev" "$ra" || true; else cc_ref_drop "$rel.prev" || true; fi
-  [ -n "$prev" ] && { printf '%s' "$(tr -d ' \r\n' < "$ROOT/VERSION")" > "$ROOT/bin/$PLAT/.prev-version"; printf '%s' "$prev" > "$ROOT/VERSION"; }
+  [ -z "$prev" ] || { printf '%s' "$(tr -d ' \r\n' < "$ROOT/VERSION")" | cc_ecrire "$ROOT/bin/$PLAT/.prev-version" || true; printf '%s' "$prev" | cc_ecrire "$ROOT/VERSION" || true; }
   cc_ok "Claude revenu à ${prev:-la version précédente}"
 }
 
@@ -639,7 +702,7 @@ cc_rollback() {
 # que son propre crochet `update` met à jour (appelé en dernier, même si rien du public
 # n'a changé, pour que la couche se recale sur le public qui vient d'arriver).
 cc_update_portable() {
-  local w f sha ok=0 fail=0
+  local w f sha ok=0 fail=0 dest
   w="$(mktemp -d)" || return 1
   cc_fetch_signed_sums "$w" || { rm -rf "$w"; return 1; }
   # uninstall.sh : l'entrée « Partir » du menu l'exécute (copie temporaire, voir cc_depart).
@@ -648,10 +711,16 @@ cc_update_portable() {
     [ -n "$sha" ] || continue
     curl -fsSL "$CCP_DL/$(basename "$f")" -o "$w/$(basename "$f")" || { cc_warn "$(basename "$f") injoignable"; fail=$((fail+1)); continue; }
     cc_check_sha "$w/$(basename "$f")" "$sha" || { fail=$((fail+1)); continue; }
+    # cc_poser : renommage d'un fichier temporaire du dossier d'arrivée, jamais d'écriture dans un nom prévisible
+    # (revue Codex, 4e passe) ; l'empreinte du fichier POSÉ est revérifiée.
     case "$f" in
-      baluchon-core-*) mkdir -p "$ROOT/bin/$CORE_PLAT"; mv -f "$w/$(basename "$f")" "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE"; chmod +x "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" 2>/dev/null || true ;;
-      *) mkdir -p "$ROOT/$(dirname "$f")"; mv -f "$w/$(basename "$f")" "$ROOT/$f" ;;
+      baluchon-core-*) mkdir -p "$ROOT/bin/$CORE_PLAT"; dest="$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" ;;
+      *) mkdir -p "$ROOT/$(dirname "$f")"; dest="$ROOT/$f" ;;
     esac
+    if ! cc_poser "$w/$(basename "$f")" "$dest" || [ "$(cc_sha256 "$dest")" != "$sha" ]; then
+      cc_warn "$(basename "$f") : pose impossible ou fichier modifié pendant la pose."; fail=$((fail+1)); continue
+    fi
+    case "$f" in baluchon-core-*) chmod +x "$dest" 2>/dev/null || true ;; esac
     ok=$((ok+1)); cc_ok "$(basename "$f") à jour"
   done
   chmod +x "$ROOT/Claude.command" 2>/dev/null || true
@@ -690,6 +759,24 @@ cc_racine_sure() {
   CC_ROOT_REAL="$real"
 }
 
+# Liens symboliques que « Partir » ne doit JAMAIS suivre : `config` lui-même, ou une entrée directe de config/
+# (un « profil » qui est un lien). Pose CC_LIENS, une entrée par ligne (`config` ou `config/<nom>`), vide si rien.
+# WHY (revue Codex, 4e passe) : à jouer AVANT tout appel au noyau. Un noyau déjà installé liste les profils par
+# `is_dir()`, qui SUIT les liens : avec `config/pro -> ~/.claude`, il purgeait les identifiants du Claude normal,
+# hors de l'installation. Le noyau d'aujourd'hui ne le fait plus (core/src/root.rs, purge.rs), mais on ne sait pas
+# quel noyau est installé : tant qu'un lien existe, aucun noyau n'est appelé, et le repli bash (qui ne suit jamais)
+# traite les vrais profils. Les points cachés de config/ ne sont pas des profils : ignorés comme le fait le noyau.
+cc_liens_config() {
+  local base="${1:-$ROOT}" e
+  CC_LIENS=""
+  if [ -L "$base/config" ]; then CC_LIENS="config"; return 0; fi
+  [ -d "$base/config" ] || return 0
+  for e in "$base"/config/*; do
+    if [ -L "$e" ]; then CC_LIENS="${CC_LIENS}${CC_LIENS:+$'\n'}config/${e##*/}"; fi
+  done
+  return 0
+}
+
 # Efface les sessions de CE portable : Trousseau macOS (services suffixés
 # seulement, jamais la session Claude Code normale de la machine) ET identifiants
 # en fichier (seul magasin sous Windows/Linux). Passe par le noyau ; le repli
@@ -702,10 +789,17 @@ cc_purge_sessions() {
   # Jamais sur une racine douteuse, ni à travers un lien : le noyau et le repli ci-dessous suivraient
   # `config` où qu'il mène (voir cc_racine_sure et cc_wipe).
   cc_racine_sure || { cc_warn "Racine d'effacement refusée ($ROOT) : rien n'est effacé."; return 1; }
-  if [ -L "$ROOT/config" ]; then cc_warn "config est un lien symbolique : il n'est jamais suivi, rien n'est effacé."; return 1; fi
-  ccp_core accounts purge >/dev/null 2>&1 || core_rc=$?
-  case "$core_rc" in 0) return 0 ;; 11) return 2 ;; esac
+  cc_liens_config "$CC_ROOT_REAL"
+  if [ "$CC_LIENS" = config ]; then cc_warn "config est un lien symbolique : il n'est jamais suivi, rien n'est effacé."; return 1; fi
   local d cfg f rc=0 sr
+  if [ -n "$CC_LIENS" ]; then
+    # Le noyau n'est PAS appelé (voir cc_liens_config) : les vrais profils passent par le repli ci-dessous, qui
+    # dit chaque lien (config/<nom> est un lien symbolique…) ; le code retour n'est plus 0.
+    rc=1
+  else
+    ccp_core accounts purge >/dev/null 2>&1 || core_rc=$?
+    case "$core_rc" in 0) return 0 ;; 11) return 2 ;; esac
+  fi
   for d in "$ROOT"/config/*/; do
     [ -d "$d" ] || continue; cfg="${d%/}"
     # Un profil qui est un lien mène hors de la racine : on ne le suit pas, et on le dit par le code retour.
@@ -832,15 +926,14 @@ cc_release_tag() {
 # $1 = SHA256SUMS authentifié, $2 = sa signature (défaut : $1.sig). Sans signature, rien n'est noté : une
 # installation dont on ne peut pas prouver la liste n'est jamais « à jour ».
 cc_release_noter() {
-  local sums="$1" sig="${2:-$1.sig}" h tag tmp
+  local sums="$1" sig="${2:-$1.sig}" h tag
   h="$(cc_sha256 "$sums")"; [ -n "$h" ] || return 1
   [ -f "$sig" ] || return 1
-  tmp="$ROOT/.baluchon-sums.$$"
-  { cp "$sums" "$tmp" && mv -f "$tmp" "$ROOT/.baluchon-sums"; } || { rm -f "$tmp"; return 1; }
-  { cp "$sig" "$tmp" && mv -f "$tmp" "$ROOT/.baluchon-sums.sig"; } || { rm -f "$tmp"; return 1; }
+  # cc_poser / cc_ecrire : plus de `.baluchon-sums.$$` à un nom prévisible (un lien posé d'avance était suivi).
+  cc_poser "$sums" "$ROOT/.baluchon-sums" || return 1
+  cc_poser "$sig" "$ROOT/.baluchon-sums.sig" || return 1
   tag="$(cc_release_tag | tr -c 'A-Za-z0-9._+-' '_')"
-  tmp="$ROOT/.baluchon-release.$$"
-  printf 'baluchon-release 1\nsums %s\ntag %s\n' "$h" "$tag" > "$tmp" && mv -f "$tmp" "$ROOT/.baluchon-release"
+  printf 'baluchon-release 1\nsums %s\ntag %s\n' "$h" "$tag" | cc_ecrire "$ROOT/.baluchon-release"
 }
 
 # Tout ce que cette installation EXÉCUTE ou source a-t-il l'empreinte d'une liste authentifiée ? $1 = SHA256SUMS

@@ -184,8 +184,9 @@ pub enum PurgeLock {
 /// réécrirait des identifiants juste après l'effacement.
 pub fn acquire_for_purge(p: &ProfileDir) -> PurgeLock {
     // `try_acquire` crée le fichier de verrou : on ne ressuscite pas un dossier
-    // de profil disparu.
-    if !p.dir.is_dir() {
+    // de profil disparu. Lu SANS suivre les liens : un lien (`config/pro -> ~/.claude`)
+    // n'est pas un dossier de profil, et y créer `.ccp-lock` écrirait dans sa cible.
+    if !std::fs::symlink_metadata(&p.dir).is_ok_and(|m| m.is_dir()) {
         return PurgeLock::NoFolder;
     }
     match acquire_patiently(p) {
@@ -221,6 +222,26 @@ mod tests {
         drop(g);
         assert_eq!(state(&p), LockState::Free);
         assert!(matches!(try_acquire(&p), Acquire::Got(_)));
+    }
+
+    /// Un lien n'est pas un dossier de profil : pas de verrou, et surtout aucun
+    /// `.ccp-lock` créé dans la cible du lien.
+    #[cfg(unix)]
+    #[test]
+    fn purge_lock_never_creates_a_lock_file_inside_a_link_target() {
+        let t = tempfile::tempdir().unwrap();
+        let cible = t.path().join("hors-installation");
+        std::fs::create_dir_all(&cible).unwrap();
+        let r = Root::new(t.path().join("inst").to_str().unwrap(), PathStyle::Unix).unwrap();
+        let p = r.profile(&Profile::parse("pro").unwrap());
+        std::fs::create_dir_all(p.dir.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&cible, &p.dir).unwrap();
+        assert!(matches!(acquire_for_purge(&p), PurgeLock::NoFolder));
+        let reste: Vec<_> = std::fs::read_dir(&cible).unwrap().flatten().collect();
+        assert!(
+            reste.is_empty(),
+            "rien n'a été créé dans la cible : {reste:?}"
+        );
     }
 
     #[test]

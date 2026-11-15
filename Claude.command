@@ -174,7 +174,7 @@ add_account() {
   if ! login_profile "$name"; then
     [ -n "$LOGIN_EMAIL" ] || { bad "Connexion non aboutie : profil « $name » retiré."; rm -rf "${ROOT:?}/config/$name"; sleep 2; return; }
   fi
-  printf '%s' "$name" > "$ROOT/ACTIVE"
+  printf '%s' "$name" | cc_ecrire "$ROOT/ACTIVE" || true   # cc_ecrire : jamais d'écriture à travers un lien
   probe_all
   render; good "Compte « $name » enregistré et défini par défaut."; sleep 2
 }
@@ -209,7 +209,7 @@ reindex() {
          else ccp_core accounts purge "$name" >/dev/null 2>&1; rm -rf "${ROOT:?}/config/$name"; note "Profil retiré."; fi ;;
       *) bad "Connexion de $email non aboutie : profil « $name » retiré."; rm -rf "${ROOT:?}/config/$name" ;;
     esac
-    [ -f "$ROOT/ACTIVE" ] || { [ "$lrc" = 0 ] && printf '%s' "$name" > "$ROOT/ACTIVE"; }
+    [ -f "$ROOT/ACTIVE" ] || { [ "$lrc" = 0 ] && { printf '%s' "$name" | cc_ecrire "$ROOT/ACTIVE" || true; }; }
     sleep 1
   done
   probe_all
@@ -219,7 +219,7 @@ reindex() {
 set_default() {
   clear 2>/dev/null || true
   local sel; sel="$(choose_account "Compte par défaut ?")" || return
-  [ -n "$sel" ] && { printf '%s' "$sel" > "$ROOT/ACTIVE"; good "✓ Défaut : « $sel »"; sleep 1; }
+  [ -n "$sel" ] && { printf '%s' "$sel" | cc_ecrire "$ROOT/ACTIVE" || true; good "✓ Défaut : « $sel »"; sleep 1; }
 }
 
 remove_account() {

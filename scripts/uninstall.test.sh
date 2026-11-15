@@ -48,7 +48,10 @@ set -uo pipefail
 ulimit -u "$(( $(ps -A | wc -l) + 300 ))" 2>/dev/null || true
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UN_SRC="$HERE/../uninstall.sh"
+# UN_A_EPROUVER : un autre uninstall.sh à jouer à la place du courant (CONTRÔLE NÉGATIF d'une révision antérieure :
+# `git show <rev>:uninstall.sh > fichier`, puis `UN_A_EPROUVER=fichier bash scripts/uninstall.test.sh <dossier>`). Les
+# épreuves nouvelles d'un correctif doivent alors échouer ; elles réussissent sur le script courant.
+UN_SRC="${UN_A_EPROUVER:-$HERE/../uninstall.sh}"
 [ -f "$UN_SRC" ] || { echo "uninstall.sh introuvable" >&2; exit 2; }
 command -v ssh-keygen >/dev/null 2>&1 || { echo "ssh-keygen est requis" >&2; exit 2; }
 
@@ -522,6 +525,42 @@ if [ "$A_ANCIEN" = 1 ] && [ "$(uname -s)" = Darwin ]; then
   grep -q 'accounts purge' "$JOURNAL_NOYAU" && grep -q 'delete-generic-password' "$JOURNAL_SECURITY" && [ "$LAST_RC" -eq 0 ] \
     && verdict vrai "CONTRÔLE POSITIF : l'ANCIEN script suivait le lien (purge et Trousseau sur ce qu'il désigne) et disait « tout va bien »" \
     || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû suivre le lien" "$LAST_RC $(cat "$JOURNAL_NOYAU") $LAST_OUT"
+fi
+# 11a2. (revue Codex, 4e passe, HIGH 5) Une ENTRÉE de config qui est un lien (config/pro -> dossier du Claude
+# normal) : le script appelait le noyau AVANT de la juger, et un noyau qui suit les liens (celui d'avant le
+# correctif de core/src/root.rs) purgeait les identifiants de ce Claude. Le noyau ci-dessous en est le modèle :
+# il efface les secrets de chaque config/*/ EN SUIVANT les liens. Attendu : il n'est PAS appelé pour la purge, le
+# témoin est intact, le lien est nommé (code 11), le Trousseau du vrai profil est quand même supprimé.
+if [ "$(uname -s)" = Darwin ]; then
+  T11="$BASE/temoin-claude-normal"; mkdir -p "$T11"
+  printf 'precieux\n' > "$T11/.credentials.json"; printf 'precieux\n' > "$T11/oauth.token"; printf 'precieux\n' > "$T11/these.txt"
+  noyau_hostile() { # noyau_hostile <dossier d'installation>
+    cat > "$1/bin/plat/baluchon-core" <<NOYAU
+#!/usr/bin/env bash
+[ "\${1:-}" = "--contract" ] && exit 0
+printf '%s\n' "\$*" >> "$JOURNAL_NOYAU"
+if [ "\${3:-} \${4:-}" = "accounts purge" ]; then
+  for p in "\$2"/config/*/; do
+    [ -d "\$p" ] || continue
+    rm -f "\$p/.credentials.json" "\$p/oauth.token" 2>/dev/null
+  done
+fi
+exit 0
+NOYAU
+    chmod +x "$1/bin/plat/baluchon-core"
+    signe_noyau "$1"
+  }
+  I="$BASE/profil-lien"; faire_install "$I"; ln -s "$T11" "$I/config/pro"; noyau_hostile "$I"
+  : > "$JOURNAL_SECURITY"; : > "$JOURNAL_NOYAU"
+  lancer "$I"
+  [ "$LAST_RC" -eq 11 ] && verdict vrai "11a2. config/pro est un lien : code 11" || verdict faux "11a2. config/pro est un lien : code 11" "$LAST_RC $LAST_OUT"
+  [ "$(cat "$T11/.credentials.json" 2>/dev/null)" = precieux ] && [ "$(cat "$T11/oauth.token" 2>/dev/null)" = precieux ] && [ "$(cat "$T11/these.txt" 2>/dev/null)" = precieux ] \
+    && verdict vrai "11a2. …le dossier du Claude normal, que le lien désigne, est INTACT" || verdict faux "11a2. …le dossier du Claude normal est INTACT" "$LAST_OUT"
+  ! grep -q 'accounts purge' "$JOURNAL_NOYAU" && verdict vrai "11a2. …le noyau n'a reçu aucun ordre de purge tant qu'un lien existe" || verdict faux "11a2. …le noyau n'a reçu aucun ordre de purge" "$(cat "$JOURNAL_NOYAU")"
+  case "$LAST_OUT" in *"config/pro"*) verdict vrai "11a2. …le lien est NOMMÉ dans le bilan" ;; *) verdict faux "11a2. …le lien est NOMMÉ dans le bilan" "$LAST_OUT" ;; esac
+  case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "11a2. …jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "11a2. …jamais « Plus aucune trace »" ;; esac
+  grep -q 'delete-generic-password' "$JOURNAL_SECURITY" && verdict vrai "11a2. …le Trousseau du vrai profil est quand même supprimé" || verdict faux "11a2. …le Trousseau du vrai profil est supprimé" "$(cat "$JOURNAL_SECURITY")"
+  [ ! -e "$I" ] && verdict vrai "11a2. …l'installation est supprimée (le lien avec, sans entrer dans sa cible)" || verdict faux "11a2. …l'installation est supprimée"
 fi
 # 11b. Trousseau (macOS) : 0 et 44 = « il n'y en a plus » ; toute autre réponse n'établit RIEN.
 if [ "$(uname -s)" = Darwin ]; then

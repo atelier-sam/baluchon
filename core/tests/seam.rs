@@ -318,6 +318,35 @@ fn purge_refuses_extension_paths_outside_the_profile_and_says_so() {
     );
 }
 
+/// Revue Codex 4e passe : un chemin d'extension qui commence bien par le dossier du
+/// profil mais passe par un sous-dossier LIEN sortait de l'installation.
+#[cfg(unix)]
+#[test]
+fn purge_refuses_extension_paths_that_go_through_a_link_inside_the_profile() {
+    let spy = Spy::new();
+    let sb = sandbox_with(&valid());
+    let dehors = sb.home.join("hors-installation");
+    std::fs::create_dir_all(&dehors).unwrap();
+    let cible = dehors.join("secret-du-claude-normal.txt");
+    std::fs::write(&cible, "à garder").unwrap();
+    let lien = sb.profile_dir("p1").join("sous-dossier-lien");
+    std::os::unix::fs::symlink(&dehors, &lien).unwrap();
+    spy.secrets
+        .lock()
+        .unwrap()
+        .push(lien.join("secret-du-claude-normal.txt"));
+    let r = drive(&spy, &sb, None, &["accounts", "purge"]);
+    assert!(
+        matches!(r, Err(CcpError::Internal(_))),
+        "purge INCOMPLÈTE annoncée, jamais « effacé » ({r:?})"
+    );
+    assert!(cible.exists(), "la cible du lien n'est jamais supprimée");
+    assert!(
+        !sb.profile_dir("p1").join(".credentials.json").exists(),
+        "le reste de la purge a bien eu lieu"
+    );
+}
+
 #[test]
 fn point_extra_origins_feeds_the_inventory() {
     let spy = Spy::new();

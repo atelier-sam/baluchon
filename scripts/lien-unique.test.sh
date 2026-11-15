@@ -400,5 +400,172 @@ for cas in noyau desinstalleur menu gum manifeste; do
   dit "G4. $cas remplacé : le refus est DIT" "ne correspond plus à la release signée"
 done
 
+# ── H. Aucune écriture à un nom prévisible, aucune empreinte calculée sur un fichier déjà posé ──────────
+# (revue Codex, 4e passe, HIGH 2 et 3.) Un tiers qui peut écrire dans UN sous-dossier de l'installation y pose d'avance
+# un lien vers un document de l'utilisateur ; l'ancien code écrivait par ce lien (`cp src dst.new`, `> .baluchon-refs.$$`)
+# puis posait le lien lui-même sur le fichier visé. Le témoin ci-dessous est ce document.
+temoin_h() { mkdir -p "$H/Documents"; printf 'precieux\n' > "$H/Documents/these.txt"; }
+temoin_h_intact() { [ "$(cat "$H/Documents/these.txt" 2>/dev/null)" = precieux ]; }
+ANCIEN_H_BRUT="$BASE/install-af1d389-brut.sh"; ANCIENNE_LIB_BRUTE="$BASE/lib-af1d389-brute.sh"
+A_ANCIEN_H=0
+if git -C "$DEPOT" show af1d389:install.sh > "$ANCIEN_H_BRUT" 2>/dev/null && [ -s "$ANCIEN_H_BRUT" ] \
+   && git -C "$DEPOT" show af1d389:lib/common.sh > "$ANCIENNE_LIB_BRUTE" 2>/dev/null && [ -s "$ANCIENNE_LIB_BRUTE" ]; then
+  A_ANCIEN_H=1; ANCIEN_H="$BASE/install-af1d389.sh"; recle "$ANCIEN_H_BRUT" "$ANCIEN_H"
+  ANCIENNE_LIB="$BASE/lib-af1d389.sh"; recle "$ANCIENNE_LIB_BRUTE" "$ANCIENNE_LIB"
+fi
+
+# H1. install.sh : les noms `<fichier>.new` sont des liens posés d'avance vers le document, pour CHAQUE fichier que
+# l'installeur télécharge (menu, bibliothèque, désinstalleur, noyau) : le document reste intact, tout est quand même posé
+# (fichiers ordinaires, empreintes de la release).
+planter_h1() { # planter_h1 : les liens « .new », dans le monde courant (avant la première installation)
+  temoin_h
+  mkdir -p "$DIR/lib" "$DIR/bin/$CORE_PLAT"
+  ln -s "$H/Documents/these.txt" "$DIR/lib/common.sh.new"
+  ln -s "$H/Documents/these.txt" "$DIR/Claude.command.new"
+  ln -s "$H/Documents/these.txt" "$DIR/uninstall.sh.new"
+  ln -s "$H/Documents/these.txt" "$DIR/bin/$CORE_PLAT/baluchon-core.new"
+}
+monde H1
+planter_h1
+joue "$INSTALL"
+egal "H1. liens .new posés d'avance, première installation : code 0" 0 "$RC"
+vrai_si "H1. ...le document vers lequel ils mènent est INTACT" temoin_h_intact
+vrai_si "H1. ...Claude.command, la bibliothèque, le désinstalleur et le noyau sont des fichiers ORDINAIRES de la release" \
+  test ! -L "$DIR/Claude.command" -a ! -L "$DIR/lib/common.sh" -a ! -L "$DIR/uninstall.sh" -a ! -L "$DIR/bin/$CORE_PLAT/baluchon-core" \
+       -a "$(shasum -a 256 "$DIR/lib/common.sh" | cut -d' ' -f1)" = "$(shasum -a 256 "$BASE/release-a/common.sh" | cut -d' ' -f1)" \
+       -a "$(shasum -a 256 "$DIR/Claude.command" | cut -d' ' -f1)" = "$(shasum -a 256 "$BASE/release-a/Claude.command" | cut -d' ' -f1)" \
+       -a "$(shasum -a 256 "$DIR/uninstall.sh" | cut -d' ' -f1)" = "$(shasum -a 256 "$BASE/release-a/uninstall.sh" | cut -d' ' -f1)"
+vrai_si "H1. ...aucun fichier temporaire de pose ne reste dans l'installation" test -z "$(find "$DIR" -name '.baluchon-pose.*' 2>/dev/null)"
+if [ "$A_ANCIEN_H" = 1 ]; then
+  monde H1a
+  planter_h1
+  joue "$ANCIEN_H"
+  vrai_si "H1. CONTRÔLE POSITIF : l'installeur d'avant (af1d389) ÉCRASAIT le document par le lien .new" test ! "$(cat "$H/Documents/these.txt" 2>/dev/null)" = precieux
+fi
+
+# H2. Les écritures de la bibliothèque à nom prévisible (`.baluchon-refs.$$`, `.baluchon-sums.$$`, `.baluchon-release.$$`) :
+# les liens sont posés depuis le MÊME shell (donc avec le bon $$) juste avant l'appel. La bibliothèque jouée est celle
+# posée dans le monde (re-clée) ; sur l'ancienne (af1d389), le document est écrasé.
+ecritures_h2() { # ecritures_h2 <lib à jouer> : joue les trois écritures, affiche leurs codes
+  env -i HOME="$H" PATH="$T/bin:/usr/bin:/bin" TERM=dumb TMPDIR="$T/tmp" CCP_DL="file://$REL" bash -c '
+    ROOT="$1"; . "$2"; cc_detect_platform
+    t="$3"
+    ln -s "$t" "$ROOT/.baluchon-refs.$$"; ln -s "$t" "$ROOT/.baluchon-sums.$$"; ln -s "$t" "$ROOT/.baluchon-release.$$"
+    h="$(printf "%064d" 7)"
+    cc_ref_set "tools/x" "$h" >/dev/null 2>&1; a=$?
+    cc_ref_drop "tools/absent" >/dev/null 2>&1; b=$?
+    cc_release_noter "$4/SHA256SUMS" "$4/SHA256SUMS.sig" >/dev/null 2>&1; c=$?
+    echo "$a $b $c"
+  ' _ "$DIR" "$1" "$H/Documents/these.txt" "$REL" 2>/dev/null
+}
+monde H2
+joue "$INSTALL"; temoin_h
+sortie="$(ecritures_h2 "$DIR/lib/common.sh")"
+egal "H2. liens .baluchon-refs.PID, .baluchon-sums.PID, .baluchon-release.PID posés d'avance : les trois écritures réussissent" "0 0 0" "$sortie"
+vrai_si "H2. ...le document vers lequel ils mènent est INTACT" temoin_h_intact
+vrai_si "H2. ...la référence est bien notée dans .baluchon-refs (fichier ordinaire)" test ! -L "$DIR/.baluchon-refs" -a "$(awk '$2=="tools/x"{print $1}' "$DIR/.baluchon-refs")" = "$(printf '%064d' 7)"
+vrai_si "H2. ...le relevé et le manifeste conservé sont des fichiers ordinaires (pas les liens)" test ! -L "$DIR/.baluchon-sums" -a ! -L "$DIR/.baluchon-sums.sig" -a ! -L "$DIR/.baluchon-release"
+if [ "$A_ANCIEN_H" = 1 ]; then
+  monde H2a
+  joue "$INSTALL"; temoin_h
+  ecritures_h2 "$ANCIENNE_LIB" >/dev/null
+  vrai_si "H2. CONTRÔLE POSITIF : la bibliothèque d'avant (af1d389) ÉCRASAIT le document par un lien .nom.PID" test ! "$(cat "$H/Documents/these.txt" 2>/dev/null)" = precieux
+fi
+
+# H3. gum : l'empreinte de référence vient du binaire EXTRAIT dans le dossier privé, jamais du fichier déjà posé.
+# Faux curl : sert, pour l'adresse de gum, une archive fabriquée (le faux gum ci-dessous) ; faux shasum : au premier
+# calcul sur le gum POSÉ (…/tools/gum/<plat>/gum), il le remplace par un programme qui laisse un témoin, puis calcule.
+cat > "$FAUX/curl-gum" <<'CURLGUM'
+#!/usr/bin/env bash
+url=""; out=""; prev=""
+for a in "$@"; do
+  [ "$prev" = -o ] && out="$a"
+  case "$a" in http*|file*) url="$a" ;; esac
+  prev="$a"
+done
+case "$url" in
+  https://github.com/charmbracelet/gum/releases/download/*)
+    if [ -e "${GUM_CTL:?}/gum-echoue" ]; then
+      # Téléchargement qui échoue ; pendant l'attente, un gum est (re)créé à sa place.
+      mkdir -p "$BALUCHON_DIR/tools/gum/$GUM_PLAT"
+      printf '#!/usr/bin/env bash\ntouch "%s"\n' "$GUM_CTL/pwned-gum" > "$BALUCHON_DIR/tools/gum/$GUM_PLAT/gum"; chmod +x "$BALUCHON_DIR/tools/gum/$GUM_PLAT/gum"
+      exit 22
+    fi
+    cp "${GUM_ARCHIVE:?}" "$out"; exit 0 ;;
+esac
+exec "${FAUX_CURL:?}" "$@"
+CURLGUM
+cat > "$FAUX/shasum-gum" <<'SHASUMGUM'
+#!/usr/bin/env bash
+if [ -e "${GUM_CTL:?}/piege-gum" ]; then
+  for a in "$@"; do
+    case "$a" in */tools/gum/*/gum)
+      rm -f "$GUM_CTL/piege-gum"
+      printf '#!/usr/bin/env bash\ntouch "%s"\n' "$GUM_CTL/pwned-gum" > "$a.sw"; mv -f "$a.sw" "$a"; chmod +x "$a" ;;
+    esac
+  done
+fi
+exec "${REAL_SHASUM:?}" "$@"
+SHASUMGUM
+chmod +x "$FAUX/curl-gum" "$FAUX/shasum-gum"
+# L'archive « officielle » de l'essai : un faux gum honnête dans un tar.gz.
+GUMPKG="$BASE/gum-pkg"; mkdir -p "$GUMPKG"; printf '#!/bin/sh\necho gum-honnete\n' > "$GUMPKG/gum"; chmod +x "$GUMPKG/gum"
+tar czf "$BASE/gum-archive.tgz" -C "$GUMPKG" gum
+GUM_SHA="$(shasum -a 256 "$BASE/gum-archive.tgz" | cut -d' ' -f1)"
+GUM_HONNETE_SHA="$(shasum -a 256 "$GUMPKG/gum" | cut -d' ' -f1)"
+monde_gum() { # monde_gum <nom> : une installation faite, puis SANS gum ni sa référence (il doit être retéléchargé)
+  monde "$1"; joue "$INSTALL"
+  rm -f "$DIR/tools/gum/$PLAT/gum"
+  grep -v "tools/gum/$PLAT/gum" "$DIR/.baluchon-refs" > "$T/refs-sans-gum" || true
+  cp "$T/refs-sans-gum" "$DIR/.baluchon-refs"
+  cp "$FAUX/curl-gum" "$T/bin/curl"; cp "$FAUX/shasum-gum" "$T/bin/shasum"
+}
+ensure_gum() { # ensure_gum <lib> : joue cc_ensure_gum (archive pinnée = celle de l'essai) ; affiche son code
+  env -i HOME="$H" PATH="$T/bin:/usr/bin:/bin" TERM=dumb TMPDIR="$T/tmp" BALUCHON_DIR="$DIR" GUM_CTL="$CTL" REAL_SHASUM="$REAL_SHASUM" \
+    FAUX_CURL="$FAUX/curl" REAL_CURL="$REAL_CURL" CURL_LOG="$T/curl.log" FAKE_CLAUDE="$FAUX/claude-stable" GUM_ARCHIVE="$BASE/gum-archive.tgz" GUM_PLAT="$PLAT" bash -c '
+    ROOT="$1"; . "$2"; cc_detect_platform
+    cc_gum_sha() { printf "%s" "'"$GUM_SHA"'"; }
+    rc=0; cc_ensure_gum >/dev/null 2>&1 || rc=$?
+    echo "$rc"
+  ' _ "$DIR" "$1" 2>/dev/null
+}
+ref_gum() { awk -v p="tools/gum/$PLAT/gum" '$2==p {print $1}' "$DIR/.baluchon-refs" 2>/dev/null; }
+
+# H3a. Fonctionnement normal : le gum « officiel » est posé, la référence = son empreinte, il est exécutable.
+monde_gum H3a
+: > "$T/curl.log"
+egal "H3a. gum retéléchargé : cc_ensure_gum réussit" 0 "$(ensure_gum "$DIR/lib/common.sh")"
+egal "H3a. …la référence notée est l'empreinte du binaire extrait" "$GUM_HONNETE_SHA" "$(ref_gum)"
+vrai_si "H3a. …le gum posé est exécutable et ordinaire" test -x "$DIR/tools/gum/$PLAT/gum" -a ! -L "$DIR/tools/gum/$PLAT/gum"
+
+# H3b. L'attaque : le gum POSÉ est remplacé avant que l'empreinte soit relevée dessus.
+monde_gum H3b
+touch "$CTL/piege-gum"
+r="$(ensure_gum "$DIR/lib/common.sh")"
+vrai_si "H3b. gum remplacé pendant la pose : cc_ensure_gum REFUSE (code non nul)" test "$r" != 0
+vrai_si "H3b. …le gum remplacé n'est pas gardé dans l'installation" test ! -e "$DIR/tools/gum/$PLAT/gum"
+vrai_si "H3b. …l'empreinte du faux n'est PAS devenue une référence" test -z "$(ref_gum)"
+vrai_si "H3b. …et le faux n'a jamais été exécuté" test ! -e "$CTL/pwned-gum"
+if [ "$A_ANCIEN_H" = 1 ]; then
+  monde_gum H3c
+  touch "$CTL/piege-gum"
+  r="$(ensure_gum "$ANCIENNE_LIB")"
+  vrai_si "H3b. CONTRÔLE POSITIF : la bibliothèque d'avant (af1d389) ACCEPTE le gum remplacé et note SON empreinte" \
+    test "$r" = 0 -a -n "$(ref_gum)" -a "$(ref_gum)" != "$GUM_HONNETE_SHA" -a -e "$DIR/tools/gum/$PLAT/gum"
+fi
+
+# H3d. Téléchargement échoué, pendant lequel un gum est (re)créé : sur une installation, « présent » ne suffit pas.
+monde_gum H3d
+touch "$CTL/gum-echoue"
+r="$(ensure_gum "$DIR/lib/common.sh")"
+vrai_si "H3d. téléchargement échoué + gum recréé pendant l'attente : cc_ensure_gum REFUSE (code non nul)" test "$r" != 0
+vrai_si "H3d. …le gum n'a jamais été exécuté et n'a aucune référence" test ! -e "$CTL/pwned-gum" -a -z "$(ref_gum)"
+if [ "$A_ANCIEN_H" = 1 ]; then
+  monde_gum H3e
+  touch "$CTL/gum-echoue"
+  r="$(ensure_gum "$ANCIENNE_LIB")"
+  vrai_si "H3d. CONTRÔLE POSITIF : la bibliothèque d'avant (af1d389) répond « gum disponible » sur un fichier sans référence" test "$r" = 0
+fi
+
 printf '%s ok, %s ko\n' "$OK" "$KO"
 [ "$KO" = 0 ]

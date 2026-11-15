@@ -249,11 +249,25 @@ fi
 # session du Claude Code normal de la machine (~/.claude), pas la nôtre.
 # Un `config` qui est un LIEN ne se suit jamais (revue Codex : il menait à ~/Documents) : ni purge par le noyau,
 # ni parcours des profils ; c'est dit, et le code est 11.
+#
+# Les ENTRÉES de config qui sont des liens (config/pro -> ~/.claude) sont jugées AVANT le noyau (revue Codex, 4e
+# passe) : un noyau déjà installé liste ses profils par `is_dir()`, qui suit les liens, et purgeait alors les
+# identifiants d'un Claude hors de ce dossier. Tant qu'un lien existe, le noyau n'est PAS appelé pour la purge ;
+# les services du Trousseau de chaque profil sont tout de même supprimés ci-dessous (leur nom vient du chemin du
+# profil, pas de sa cible), et `rm -rf` du dossier retire le lien lui-même sans jamais entrer dans sa cible.
+LIENS_CFG=""
+if [ -d "$DIR/config" ] && [ ! -L "$DIR/config" ]; then
+  for d in "$DIR"/config/*; do
+    if [ -L "$d" ]; then LIENS_CFG="${LIENS_CFG}${LIENS_CFG:+, }config/${d##*/}"; fi
+  done
+fi
 if [ -L "$DIR/config" ]; then
   incomplet 11 "« config » est un lien symbolique : il n'a pas été suivi, les sessions qu'il désigne n'ont PAS été effacées."
 elif [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ]; then
   verifie_ou_refuse
-  if [ -n "$CORE" ]; then
+  if [ -n "$LIENS_CFG" ]; then
+    incomplet 11 "Ces entrées de config sont des liens symboliques : non suivis, le noyau n'a pas été appelé pour la purge des fichiers, les sessions qu'elles désignent n'ont PAS été effacées : $LIENS_CFG"
+  elif [ -n "$CORE" ]; then
     sortie="$("$CORE" --root "$DIR" accounts purge 2>&1)"; rc=$?
     if [ "$rc" != 0 ]; then
       incomplet 11 "La purge des sessions est incomplète (code $rc) :"$'\n'"$(indente "$sortie")"

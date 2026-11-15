@@ -159,5 +159,60 @@ o="$(cd "$BASE" && env -i HOME="$BASE/domicile-essai" PATH="/usr/bin:/bin" bash 
 egal "8. racine relative : refusée (code 1)" 1 "$o"
 verdict "$([ -f "$BASE/rel8/config/p1/.credentials.json" ] && echo vrai || echo faux)" "8. racine relative : rien n'est effacé"
 
+# 9) (revue Codex, 4e passe, HIGH 5) Le lien était jugé APRÈS l'appel au noyau : `config/pro -> ~/.claude` faisait
+# purger au noyau (qui listait ses profils par `is_dir()`, donc en suivant le lien) les identifiants du Claude normal.
+# Le faux noyau ci-dessous est un modèle de ce vieux noyau : il parcourt config/*/ en suivant les liens et efface
+# les secrets de chaque entrée, et il note ses appels dans APPELS. Preuve attendue : tant qu'un lien existe, il n'est
+# PAS appelé pour `accounts purge`, le témoin est intact, les vrais profils sont effacés par le repli bash, code != 0.
+HOSTILE="$BASE/noyau-hostile"
+cat > "$HOSTILE" <<'NOYAU'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")" && pwd)"
+root=""
+if [ "$1" = --root ]; then root="$2"; shift 2; fi
+printf '%s\n' "$*" >> "$d/APPELS"
+case "$1 $2" in
+  "accounts purge")
+    for p in "$root"/config/*/; do
+      [ -d "$p" ] || continue
+      rm -f "$p/.credentials.json" "$p/oauth.token" "$p/.ccp-pending" 2>/dev/null
+    done
+    exit 0 ;;
+  "remote forget-access") exit 0 ;;
+esac
+exit 64
+NOYAU
+chmod +x "$HOSTILE"
+appels_purge() { grep -c '^accounts purge' "$BASE/APPELS" 2>/dev/null || true; }
+
+# 9a) config/pro est un lien vers un dossier témoin qui porte des identifiants.
+: > "$BASE/APPELS"
+T9="$BASE/temoin-claude-normal"; mkdir -p "$T9"
+printf 'precieux\n' > "$T9/.credentials.json"; printf 'precieux\n' > "$T9/oauth.token"; printf 'precieux\n' > "$T9/these.txt"
+R="$BASE/lien-profil-noyau-hostile"; mkdir -p "$R/config/perso"
+printf '{"jeton":"faux"}\n' > "$R/config/perso/.credentials.json"; ln -s "$T9" "$R/config/pro"
+o="$(joue "$R" "$LIB" "$HOSTILE")"
+verdict "$([ "$(cat "$T9/.credentials.json" 2>/dev/null)" = precieux ] && [ "$(cat "$T9/oauth.token" 2>/dev/null)" = precieux ] && [ "$(cat "$T9/these.txt" 2>/dev/null)" = precieux ] && echo vrai || echo faux)" "9a. profil lien + noyau qui suit les liens : le témoin est INTACT"
+egal "9a. profil lien : le noyau n'est PAS appelé pour accounts purge" 0 "$(appels_purge)"
+verdict "$([ ! -e "$R/config/perso" ] && echo vrai || echo faux)" "9a. profil lien : le vrai profil est quand même effacé (repli bash)"
+verdict "$([ -L "$R/config/pro" ] && echo vrai || echo faux)" "9a. profil lien : le lien est laissé en place"
+[ "${o%%|*}" != 0 ] && verdict vrai "9a. profil lien : le code n'est pas 0" || verdict faux "9a. profil lien : le code n'est pas 0" "code ${o%%|*}"
+
+# 9b) config lui-même est un lien.
+: > "$BASE/APPELS"
+T9b="$BASE/temoin-config-hostile"; mkdir -p "$T9b/1"; printf 'precieux\n' > "$T9b/1/.credentials.json"
+R="$BASE/lien-config-noyau-hostile"; mkdir -p "$R"; ln -s "$T9b" "$R/config"
+o="$(joue "$R" "$LIB" "$HOSTILE")"
+verdict "$([ "$(cat "$T9b/1/.credentials.json" 2>/dev/null)" = precieux ] && echo vrai || echo faux)" "9b. config lien + noyau qui suit les liens : le témoin est INTACT"
+egal "9b. config lien : le noyau n'est PAS appelé pour accounts purge" 0 "$(appels_purge)"
+[ "${o%%|*}" != 0 ] && verdict vrai "9b. config lien : le code n'est pas 0" || verdict faux "9b. config lien : le code n'est pas 0" "code ${o%%|*}"
+
+# 9c) Contrôle d'instrument : sans lien, le même faux noyau EST appelé (sinon 9a/9b ne prouveraient rien).
+: > "$BASE/APPELS"
+R="$(racine sans-lien-noyau-hostile)"
+o="$(joue "$R" "$LIB" "$HOSTILE")"
+egal "9c. sans lien : le noyau est appelé pour accounts purge" 1 "$(appels_purge)"
+egal "9c. sans lien : code 0" 0 "${o%%|*}"
+
 printf '%s ok, %s ko\n' "$OK" "$KO"
 [ "$KO" = 0 ]

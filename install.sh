@@ -51,7 +51,31 @@ fetch() {
   [ -n "$want" ] || die "$1 absent de la release."
   curl -fsSL "$CCP_DL/$1" -o "$W/$1" || die "Téléchargement de $1 échoué."
   [ "$(sha "$W/$1")" = "$want" ] || die "Empreinte invalide pour $1 : installation annulée."
-  mkdir -p "$(dirname "$2")"; cp "$W/$1" "$2.new" && mv -f "$2.new" "$2"
+  mkdir -p "$(dirname "$2")"
+  poser "$W/$1" "$2" || die "Pose de $1 impossible ($2) : installation annulée."
+  # Ce qui est POSÉ doit avoir l'empreinte signée, pas seulement ce qui a été téléchargé.
+  [ "$(sha "$2")" = "$want" ] || { rm -f "$2"; die "$1 modifié pendant sa pose : installation annulée."; }
+}
+
+# poser <source> <destination> : copie par un fichier temporaire du MÊME dossier puis renommage, sans jamais
+# écrire dans un nom prévisible ni suivre un lien (revue Codex, 4e passe : `cp src dst.new && mv dst.new dst`
+# suivait un `dst.new` lié par un tiers vers un document de l'utilisateur, puis posait ce lien sur `dst`).
+# Même mécanique que cc_ecrire (lib/common.sh), reprise ici parce que la bibliothèque n'est ni téléchargée ni
+# vérifiée à ce stade : nom imprévisible, ouverture en O_EXCL (`set -C`), octets écrits par ce descripteur
+# (le chemin n'est pas rouvert), `mv` REMPLACE la destination (un lien disparaît, sa cible est intacte),
+# un dossier à la place de la destination est refusé. Droits : ceux du umask, comme un `>`.
+poser() { # poser <source> <destination>
+  local dst="$2" d tmp rc
+  [ -f "$1" ] || return 1
+  case "$dst" in */*) d="${dst%/*}"; [ -n "$d" ] || d=/ ;; *) d=. ;; esac
+  [ -d "$d" ] && [ ! -d "$dst" ] || return 1
+  tmp="$d/.baluchon-pose.$$.$RANDOM$RANDOM$RANDOM"
+  # 97 = l'ouverture O_EXCL a échoué : ce fichier n'est pas à nous, on n'y touche pas.
+  rc=0; ( set -C; exec 3> "$tmp" || exit 97; cat < "$1" >&3 ) 2>/dev/null || rc=$?
+  [ "$rc" != 97 ] || return 1
+  if [ "$rc" = 0 ] && mv -f -- "$tmp" "$dst" 2>/dev/null; then return 0; fi
+  rm -f -- "$tmp"
+  return 1
 }
 
 # Copie PRIVÉE et AUTHENTIFIÉE de la bibliothèque posée sous $DIR : copiée dans $W, hachée SUR LA COPIE, et
@@ -86,7 +110,8 @@ installer_complet() {
   # « à jour » tombe tant que l'installation n'est pas finie : une coupure au milieu ne passe jamais
   # pour une installation complète.
   mkdir -p "$DIR"
-  printf 'baluchon-install 1\n' > "$DIR/.baluchon-install"
+  printf 'baluchon-install 1\n' > "$W/marqueur"
+  poser "$W/marqueur" "$DIR/.baluchon-install" || die "Marqueur d'installation impossible à poser dans $DIR."
   # Le relevé ET le manifeste conservé de l'ancienne release tombent ensemble : tant que l'installation n'est
   # pas finie, rien n'est reconnu (ni « à jour », ni authentifié), et un fichier posé à moitié n'est jamais lancé.
   rm -f "$DIR/.baluchon-release" "$DIR/.baluchon-sums" "$DIR/.baluchon-sums.sig"
@@ -113,7 +138,9 @@ installer_complet() {
   ok "Wizard + noyau baluchon-core vérifiés"
 
   # 4) Claude (canal stable, vérifié contre le manifest Anthropic) + gum (empreinte épinglée)
-  curl -fsSL "https://downloads.claude.ai/claude-code-releases/stable" -o "$DIR/VERSION" || die "Version de Claude introuvable."
+  curl -fsSL "https://downloads.claude.ai/claude-code-releases/stable" -o "$W/VERSION" || die "Version de Claude introuvable."
+  [ -s "$W/VERSION" ] || die "Version de Claude introuvable."
+  poser "$W/VERSION" "$DIR/VERSION" || die "Version de Claude impossible à noter dans $DIR."
   say "Téléchargement du binaire Claude + de l'interface… (peut prendre ~1 min)"
   ( set +e; cc_ensure_binary ) || die "Échec du téléchargement de Claude."
   cc_ensure_gum >/dev/null 2>&1 || printf '\033[33m⚠ Interface gum indisponible : baluchon lancera directement le compte par défaut.\033[0m\n'

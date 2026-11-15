@@ -69,16 +69,42 @@ pub fn purge(
     root: &Root,
     only: Option<&Profile>,
 ) -> Result<PurgeReport> {
+    let mut report = PurgeReport::default();
+    // Un LIEN n'est jamais suivi : `config/` redirigé, ou `config/pro -> ~/.claude`,
+    // ferait purger les identifiants d'un Claude HORS de l'installation. Chaque lien
+    // est consigné en échec (exit 10) et l'utilisateur le retire lui-même. Le contrôle
+    // précède tout verrou, toute lecture de dossier et toute suppression.
+    if root.profiles_dir_is_link() {
+        report.failures.push(format!(
+            "{} : lien symbolique, non suivi — rien n'est effacé (retire ce lien toi-même)",
+            root.profiles_dir().display()
+        ));
+        return Ok(report);
+    }
     let profiles: Vec<Profile> = match only {
         Some(p) => vec![p.clone()],
-        None => root.list_profiles(),
+        None => {
+            for n in root.linked_entries() {
+                report.failures.push(format!(
+                    "{} : lien symbolique, non suivi — rien n'est effacé dedans (retire ce lien toi-même)",
+                    root.profiles_dir().join(n).display()
+                ));
+            }
+            root.list_profiles()
+        }
     };
-    let mut report = PurgeReport {
-        profiles: profiles.len(),
-        ..PurgeReport::default()
-    };
+    report.profiles = profiles.len();
     for name in &profiles {
         let pd = root.profile(name);
+        if is_link(&pd.dir) {
+            // Profil demandé par son nom : même refus que s'il était listé.
+            report.profiles -= 1;
+            report.failures.push(format!(
+                "{} (profil {name}) : lien symbolique, non suivi — rien n'est effacé dedans",
+                pd.dir.display()
+            ));
+            continue;
+        }
         // Le garde vit jusqu'à la fin de l'itération : fichiers ET Trousseau sont
         // effacés verrou en main.
         let _guard = match lock::acquire_for_purge(&pd) {
@@ -143,6 +169,17 @@ fn purge_files(ext: &dyn Extension, pd: &ProfileDir, failures: &mut Vec<String>)
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir));
         if f.starts_with(&pd.dir) && !escapes {
+            // Un sous-dossier LIEN entre le profil et le fichier ferait sortir
+            // l'effacement du profil : refusé et consigné, comme un chemin hors profil.
+            if let Some(l) = link_between(&pd.dir, &f) {
+                failures.push(format!(
+                    "{} (profil {}) : passe par le lien {}, non suivi, refusé",
+                    f.display(),
+                    pd.name,
+                    l.display()
+                ));
+                continue;
+            }
             files.push(f);
         } else {
             failures.push(format!(
@@ -160,6 +197,28 @@ fn purge_files(ext: &dyn Extension, pd: &ProfileDir, failures: &mut Vec<String>)
         }
     }
     n
+}
+
+/// Ce chemin est-il un lien (lu SANS le suivre) ? Absent ou illisible : non.
+fn is_link(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Premier composant de `f` sous `base` (exclu) qui est un lien, dernier composant
+/// exclu : un fichier-lien se supprime lui-même (`remove_file` ne suit pas), un
+/// DOSSIER-lien au milieu du chemin redirigerait la suppression. `None` = chemin sûr.
+fn link_between(base: &Path, f: &Path) -> Option<std::path::PathBuf> {
+    let rel = f.strip_prefix(base).ok()?;
+    let mut cur = base.to_path_buf();
+    let mut comps: Vec<_> = rel.components().collect();
+    comps.pop();
+    for c in comps {
+        cur.push(c.as_os_str());
+        if is_link(&cur) {
+            return Some(cur);
+        }
+    }
+    None
 }
 
 /// `Ok(true)` effacé, `Ok(false)` déjà absent. Un FICHIER seulement : si un
@@ -370,6 +429,111 @@ mod tests {
         assert!(!d.join(".credentials.json").exists(), "le reste est effacé");
         assert!(!d.join(".ccp-pending").exists(), "le reste est effacé");
         assert!(d.join("oauth.token").exists());
+    }
+
+    /// Dossier TÉMOIN hors de l'installation, avec les fichiers qu'un Claude normal y
+    /// garde : la purge n'a le droit d'y toucher ni de loin ni de près.
+    #[cfg(unix)]
+    fn temoin(t: &tempfile::TempDir) -> std::path::PathBuf {
+        let w = t.path().join("hors-installation").join("claude-normal");
+        std::fs::create_dir_all(&w).unwrap();
+        for f in [".credentials.json", "oauth.token", ".ccp-pending"] {
+            std::fs::write(w.join(f), "temoin").unwrap();
+        }
+        w
+    }
+
+    #[cfg(unix)]
+    fn temoin_intact(w: &std::path::Path) {
+        for f in [".credentials.json", "oauth.token", ".ccp-pending"] {
+            assert!(
+                w.join(f).exists(),
+                "le témoin {f} a été supprimé par la purge"
+            );
+        }
+        assert!(
+            !w.join(".ccp-lock").exists(),
+            "un verrou a été créé dans la cible d'un lien"
+        );
+    }
+
+    /// Revue Codex 4e passe, point 5 : `config/pro -> ~/.claude` — la purge suivait le
+    /// lien et supprimait les identifiants du Claude normal, hors de l'installation.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_link_is_never_followed_and_is_reported_as_a_failure() {
+        let (t, root, env, d) = sandbox("1");
+        std::fs::write(d.join(".credentials.json"), "{}").unwrap();
+        let w = temoin(&t);
+        std::os::unix::fs::symlink(&w, t.path().join("config").join("pro")).unwrap();
+        let r = purge(&env, &root, None).unwrap();
+        temoin_intact(&w);
+        assert!(
+            !d.join(".credentials.json").exists(),
+            "le vrai profil est purgé"
+        );
+        assert_eq!(r.profiles, 1, "le lien n'est pas un profil : {r:?}");
+        assert!(!r.complete(), "un lien laissé = purge incomplète");
+        assert_eq!(r.failures.len(), 1, "{r:?}");
+        assert!(
+            r.failures[0].contains("pro") && r.failures[0].contains("lien"),
+            "{r:?}"
+        );
+    }
+
+    /// Même refus quand le profil-lien est NOMMÉ (`accounts purge pro`) : le
+    /// contrôle ne dépend pas de la liste.
+    #[cfg(unix)]
+    #[test]
+    fn a_named_profile_that_is_a_link_is_refused_too() {
+        let (t, root, env, _d) = sandbox("1");
+        let w = temoin(&t);
+        std::os::unix::fs::symlink(&w, t.path().join("config").join("pro")).unwrap();
+        let p = Profile::parse("pro").unwrap();
+        let r = purge(&env, &root, Some(&p)).unwrap();
+        temoin_intact(&w);
+        assert_eq!(r.removed, 0);
+        assert_eq!(r.profiles, 0, "{r:?}");
+        assert!(!r.complete() && r.failures[0].contains("lien"), "{r:?}");
+    }
+
+    /// `config` lui-même est un lien : plus rien n'est lu ni effacé, pas même les
+    /// profils réels qu'il contient.
+    #[cfg(unix)]
+    #[test]
+    fn a_config_dir_that_is_a_link_is_never_followed() {
+        let t = tempfile::tempdir().unwrap();
+        let ailleurs = t.path().join("ailleurs");
+        std::fs::create_dir_all(ailleurs.join("1")).unwrap();
+        std::fs::write(ailleurs.join("1").join(".credentials.json"), "temoin").unwrap();
+        let inst = t.path().join("inst");
+        std::fs::create_dir_all(&inst).unwrap();
+        std::os::unix::fs::symlink(&ailleurs, inst.join("config")).unwrap();
+        let root = Root::new(inst.to_str().unwrap(), PathStyle::Unix).unwrap();
+        let env = Env::for_tests(t.path().to_path_buf());
+        let r = purge(&env, &root, None).unwrap();
+        assert!(ailleurs.join("1").join(".credentials.json").exists());
+        assert!(!ailleurs.join("1").join(".ccp-lock").exists());
+        assert_eq!(r.removed, 0);
+        assert!(!r.complete() && r.failures[0].contains("lien"), "{r:?}");
+        let p = Profile::parse("1").unwrap();
+        let r = purge(&env, &root, Some(&p)).unwrap();
+        assert!(ailleurs.join("1").join(".credentials.json").exists());
+        assert!(!r.complete(), "{r:?}");
+    }
+
+    /// Un fichier-lien DANS un vrai profil se supprime lui-même : la cible reste.
+    #[cfg(unix)]
+    #[test]
+    fn a_secret_file_that_is_a_link_is_unlinked_not_followed() {
+        let (t, root, env, d) = sandbox("1");
+        let w = temoin(&t);
+        std::os::unix::fs::symlink(w.join(".credentials.json"), d.join(".credentials.json"))
+            .unwrap();
+        let r = purge(&env, &root, None).unwrap();
+        temoin_intact(&w);
+        assert!(std::fs::symlink_metadata(d.join(".credentials.json")).is_err());
+        assert!(r.complete(), "{r:?}");
     }
 
     #[test]

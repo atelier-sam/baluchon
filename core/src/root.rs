@@ -224,14 +224,45 @@ impl Root {
         }
     }
 
+    /// Chemin du dossier `config/` (celui qui porte les profils).
+    pub fn profiles_dir(&self) -> PathBuf {
+        PathBuf::from(format!("{}{}{PROFILES_DIR}", self.raw, self.style.sep()))
+    }
+
+    /// `config/` est-il lui-même un LIEN (lu sans le suivre) ? Un lien à cet endroit
+    /// redirigerait toute la purge hors de l'installation.
+    pub fn profiles_dir_is_link(&self) -> bool {
+        std::fs::symlink_metadata(self.profiles_dir()).is_ok_and(|m| m.file_type().is_symlink())
+    }
+
+    /// Noms des entrées de `config/` qui sont des LIENS (jamais suivis, jamais des
+    /// profils : `list_profiles` les ignore). La purge les consigne en échec au lieu
+    /// de suivre leur cible, qui peut être un dossier hors de l'installation.
+    pub fn linked_entries(&self) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(self.profiles_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_symlink()))
+            .filter_map(|e| e.file_name().to_str().map(str::to_string))
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Profils présents sur disque, triés (numérique d'abord : 1, 2, 10, puis noms).
+    ///
+    /// Un LIEN n'est pas un profil : `DirEntry::file_type` ne suit pas les liens
+    /// (là où `Path::is_dir` les suivait), donc `config/pro -> ~/.claude` n'apparaît
+    /// plus, et ce qui l'utilise pour purger ne sort plus de l'installation.
     pub fn list_profiles(&self) -> Vec<Profile> {
         let dir = format!("{}{}{PROFILES_DIR}", self.raw, self.style.sep());
         let mut out: Vec<Profile> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
             .flatten()
-            .filter(|e| e.path().is_dir())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .filter_map(|e| e.file_name().to_str().map(str::to_string))
             .filter(|n| !n.starts_with('.'))
             .filter_map(|n| Profile::parse(&n).ok())
@@ -382,6 +413,42 @@ mod tests {
         let r = Root::new(t.path().to_str().unwrap(), PathStyle::Unix).unwrap();
         let names: Vec<String> = r.list_profiles().iter().map(|p| p.to_string()).collect();
         assert_eq!(names, ["1", "2", "10", "alpha", "zeta"]);
+    }
+
+    /// Revue Codex 4e passe : `config/pro -> ~/.claude` était listé (`is_dir` suit les
+    /// liens) donc purgé. Un lien n'est jamais un profil ; il est listé à part.
+    #[cfg(unix)]
+    #[test]
+    fn list_profiles_never_follows_links_and_reports_them_apart() {
+        let t = tempfile::tempdir().unwrap();
+        let cible = t.path().join("hors-installation");
+        std::fs::create_dir_all(&cible).unwrap();
+        let inst = t.path().join("inst");
+        std::fs::create_dir_all(inst.join("config").join("1")).unwrap();
+        std::os::unix::fs::symlink(&cible, inst.join("config").join("pro")).unwrap();
+        std::os::unix::fs::symlink(&cible, inst.join("config").join(".cache")).unwrap();
+        let r = Root::new(inst.to_str().unwrap(), PathStyle::Unix).unwrap();
+        let names: Vec<String> = r.list_profiles().iter().map(|p| p.to_string()).collect();
+        assert_eq!(names, ["1"], "le lien pro n'est pas un profil");
+        assert_eq!(
+            r.linked_entries(),
+            ["pro"],
+            "les liens sont signalés à part"
+        );
+        assert!(!r.profiles_dir_is_link());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_dir_that_is_a_link_is_detected() {
+        let t = tempfile::tempdir().unwrap();
+        let cible = t.path().join("ailleurs");
+        std::fs::create_dir_all(cible.join("1")).unwrap();
+        let inst = t.path().join("inst");
+        std::fs::create_dir_all(&inst).unwrap();
+        std::os::unix::fs::symlink(&cible, inst.join("config")).unwrap();
+        let r = Root::new(inst.to_str().unwrap(), PathStyle::Unix).unwrap();
+        assert!(r.profiles_dir_is_link());
     }
 
     #[test]
