@@ -37,6 +37,33 @@ function Say($msg)  { Write-Host ". $msg" -ForegroundColor Cyan }
 function Sha($path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLower() }
 function Get($url, $out) { Invoke-WebRequest -Uri $url -OutFile $out -UseBasicParsing }
 
+# "Partir" (menu) efface tout SAUF git-win, dont le bash tourne encore, et pose .baluchon-a-finir (voir
+# uninstall.sh). Cette fonction finit le travail une fois bash termine : git-win avec reessais (un guetteur
+# bash peut survivre ~2 s au menu), le temoin, puis le dossier SEULEMENT s'il est vide (Directory.Delete non
+# recursif) : rien d'autre n'est jamais efface ici. Rend $true si plus rien ne reste du dossier.
+function Finish-Depart {
+  if (-not (Test-Path -LiteralPath "$Dir\.baluchon-a-finir") -or (Test-Path -LiteralPath "$Dir\.baluchon-install")) { return $false }
+  # Local a la fonction : sous "Stop", PowerShell 5.1 fait d'une ligne d'erreur d'un programme natif (rmdir sur
+  # un fichier encore ouvert) une erreur fatale ; ici un echec se constate en relisant le disque.
+  $ErrorActionPreference = "Continue"
+  Set-Location $env:TEMP
+  # rmdir /s de cmd, pas Remove-Item -Recurse : celui de PowerShell 5.1 peut suivre une jonction et vider sa
+  # cible ; rmdir retire la jonction elle-meme sans y entrer (on ne suit jamais un lien pour effacer).
+  for ($i = 0; $i -lt 30 -and (Test-Path -LiteralPath "$Dir\git-win"); $i++) {
+    & cmd.exe /d /c rmdir /s /q "$Dir\git-win" 2>$null
+    if (Test-Path -LiteralPath "$Dir\git-win") { Start-Sleep -Seconds 1 }
+  }
+  if (-not (Test-Path -LiteralPath "$Dir\git-win")) { Remove-Item -LiteralPath "$Dir\.baluchon-a-finir" -Force -ErrorAction SilentlyContinue }
+  try { [IO.Directory]::Delete($Dir, $false) } catch {}
+  return -not (Test-Path -LiteralPath $Dir)
+}
+
+# Un depart precedent inacheve (fenetre fermee avant la derniere etape) : on le termine avant de reinstaller,
+# pour repartir d'un Git portable verifie plutot que de reprendre un git-win que plus rien n'authentifie.
+if ((Test-Path -LiteralPath "$Dir\.baluchon-a-finir") -and -not (Test-Path -LiteralPath "$Dir\.baluchon-install")) {
+  if (-not (Finish-Depart) -and (Test-Path -LiteralPath "$Dir\git-win")) { Fail "Un depart precedent n'a pas pu finir ($Dir\git-win) : ferme les fenetres Baluchon et relance." }
+}
+
 New-Item -ItemType Directory -Force -Path $W, "$Dir\git-win" | Out-Null
 Say "Installation de Baluchon dans $Dir"
 
@@ -57,9 +84,11 @@ function Install-PortableGit {
 if (-not (Test-Path "$Dir\git-win\bin\bash.exe")) { Install-PortableGit }
 $Bash = "$Dir\git-win\bin\bash.exe"
 
-$SshKeygen = (Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue).Source
-if (-not $SshKeygen -and (Test-Path "$Dir\git-win\usr\bin\ssh-keygen.exe")) { $SshKeygen = "$Dir\git-win\usr\bin\ssh-keygen.exe" }
-if (-not $SshKeygen) { Fail "ssh-keygen introuvable : impossible d'authentifier la release." }
+# TOUJOURS le ssh-keygen de Git portable (verifie a l'etape 1), jamais celui de Windows : le
+# ssh-keygen de C:\Windows\System32\OpenSSH ne voit pas la fin d'un stdin redirige et attend
+# indefiniment (mesure le 15/11/2026 sur Windows 11 : -Y verify bloque, celui de Git rend 0).
+$SshKeygen = "$Dir\git-win\usr\bin\ssh-keygen.exe"
+if (-not (Test-Path $SshKeygen)) { Fail "ssh-keygen de Git portable introuvable : impossible d'authentifier la release." }
 
 # --- 2) Sommes signees de la release, puis install.sh verifie -------------------------------
 Get "$CcpDl/SHA256SUMS" "$W\SHA256SUMS"
@@ -72,10 +101,13 @@ $psi.Arguments = "-Y verify -f `"$W\allowed_signers`" -I $SignerId -n file -s `"
 $psi.UseShellExecute = $false
 $psi.RedirectStandardInput = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
 $proc = [Diagnostics.Process]::Start($psi)
+# Sorties lues en asynchrone AVANT d'ecrire stdin : aucun interblocage possible sur un tampon plein.
+$outTask = $proc.StandardOutput.ReadToEndAsync(); $errTask = $proc.StandardError.ReadToEndAsync()
 $bytes = [IO.File]::ReadAllBytes("$W\SHA256SUMS")
-$proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length); $proc.StandardInput.Close()
-$null = $proc.StandardOutput.ReadToEnd(); $null = $proc.StandardError.ReadToEnd()
-$proc.WaitForExit()
+$proc.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length); $proc.StandardInput.BaseStream.Flush(); $proc.StandardInput.Close()
+# Une verification qui ne rend pas la main en 60 s est un ECHEC, jamais une attente sans fin.
+if (-not $proc.WaitForExit(60000)) { try { $proc.Kill() } catch {}; Fail "Verification de signature bloquee (ssh-keygen) : installation annulee." }
+$null = $outTask.Result; $null = $errTask.Result
 if ($proc.ExitCode -ne 0) { Fail "Signature de la release INVALIDE : installation annulee." }
 Ok "Release authentifiee (signature $SignerId)"
 
@@ -94,18 +126,27 @@ $env:BALUCHON_DIR = $Dir -replace '\\', '/'
 & $Bash --noprofile --norc ("$W\install.sh" -replace '\\', '/')
 $rc = $LASTEXITCODE
 Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue
-# "Partir" a pu tout effacer pendant le menu : rien d'autre a poser, le code dit ce qui reste.
-if (-not (Test-Path "$Dir\.baluchon-install")) { exit $rc }
+# "Partir" a pu tout effacer pendant le menu : rien d'autre a poser. Derniere etape (git-win), relue.
+if (-not (Test-Path "$Dir\.baluchon-install")) {
+  if (Test-Path -LiteralPath "$Dir\.baluchon-a-finir") {
+    if (Finish-Depart) { Write-Host "  OK Rien ne reste sur cet ordinateur." -ForegroundColor Green; exit $rc }
+    Write-Host "  ! Il reste le dossier $Dir : ferme les fenetres Baluchon puis supprime-le a la main." -ForegroundColor Yellow
+    exit 12
+  }
+  exit $rc
+}
 if ($rc -ne 0) { Fail "Installation interrompue (code $rc) : relance la meme commande." }
 
 # --- 4) Commandes courtes et PATH -------------------------------------------------------------
 $binDir = "$env:USERPROFILE\.local\bin"
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+# Une seule ligne qui ENCHAINE sur claude.cmd (pas de `call`) : cmd ne revient jamais lire cette commande,
+# que "Partir" efface pendant le menu (sinon : "Le fichier de commandes est introuvable").
 foreach ($n in @("baluchon", "ccp")) {
-  Set-Content "$binDir\$n.cmd"  "@echo off`r`ncall `"$Dir\claude.cmd`" %*"
+  Set-Content "$binDir\$n.cmd"  "@`"$Dir\claude.cmd`" %*"
 }
 foreach ($n in @("baluchon1", "ccp1")) {
-  Set-Content "$binDir\$n.cmd" "@echo off`r`nset `"CC_PROFILE=2`"`r`ncall `"$Dir\claude.cmd`" %*"
+  Set-Content "$binDir\$n.cmd" "@set `"CC_PROFILE=2`" & `"$Dir\claude.cmd`" %*"
 }
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($userPath -notlike "*$binDir*") {

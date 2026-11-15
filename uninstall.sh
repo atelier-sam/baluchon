@@ -38,6 +38,14 @@
 set -uo pipefail
 DIR_DEMANDE="${BALUCHON_DIR:-$HOME/.baluchon}"
 BINDIR="$HOME/.local/bin"
+# Windows (bash de Git portable, reconnu à `cygpath`) : le bash qui exécute ce script, celui du menu et leurs
+# DLL vivent dans <dossier>/git-win. Un programme en cours d'exécution ne s'efface pas sous Windows : le `rm`
+# de MSYS « réussit » en déplaçant ces fichiers dans la Corbeille de l'utilisateur, où ils RESTENT (mesuré le
+# 15/11/2026 : bash.exe et 5 DLL, ~7 Mo, encore là après la fin du processus). On efface donc tout SAUF git-win,
+# on pose le témoin .baluchon-a-finir, et c'est le lanceur natif (claude.cmd, install.ps1), une fois bash
+# terminé, qui retire git-win puis le dossier VIDE (jamais un `rmdir /s` du dossier lui-même) et le dit.
+WINDOWS=0; command -v cygpath >/dev/null 2>&1 && WINDOWS=1
+A_FINIR=".baluchon-a-finir"
 OUI=0
 [ "${1:-}" = "--oui" ] && OUI=1
 # Clé qui signe les releases du produit (même constante que install.sh et lib/common.sh).
@@ -496,11 +504,34 @@ fi
   cd -P -- "$PARENT" 2>/dev/null || exit 3
   [ "$(pwd -P)" = "$PARENT" ] && [ "$(identite .)" = "$ID_PARENT" ] || exit 3
   [ -d "./$LEAF" ] && [ ! -L "./$LEAF" ] && [ "$(identite "./$LEAF")" = "$ID_DIR" ] || exit 3
+  if [ "$WINDOWS" = 1 ]; then
+    # Entrée dans le dossier lui-même, identité revérifiée, puis chaque entrée par un nom RELATIF, sauf git-win
+    # (un vrai dossier, pas un lien), que le lanceur natif retire quand plus rien n'en tourne.
+    cd -P -- "./$LEAF" 2>/dev/null && [ "$(identite .)" = "$ID_DIR" ] || exit 3
+    r=0
+    for e in ./* ./.[!.]* ./..?*; do
+      { [ -e "$e" ] || [ -L "$e" ]; } || continue
+      if [ "$e" = ./git-win ] && [ -d "$e" ] && [ ! -L "$e" ]; then continue; fi
+      rm -rf -- "$e" || r=1
+    done
+    : > "./$A_FINIR" || r=1
+    exit "$r"
+  fi
   rm -rf -- "./$LEAF"
 )
 rc_rm=$?
 [ "$rc_rm" -ne 3 ] || refus_tard "Le dossier d'installation a changé (lien ou dossier remplacé) depuis qu'il a été jugé."
-if [ -e "$DIR" ] || [ -L "$DIR" ]; then
+if [ "$WINDOWS" = 1 ]; then
+  # Il ne doit rester QUE git-win et le témoin : tout autre reste est un effacement incomplet, dit comme tel.
+  autre=""
+  for e in "$DIR"/* "$DIR"/.[!.]* "$DIR"/..?*; do
+    { [ -e "$e" ] || [ -L "$e" ]; } || continue
+    case "${e##*/}" in git-win|"$A_FINIR") ;; *) autre="${autre} ${e##*/}" ;; esac
+  done
+  if [ -n "$autre" ] || [ ! -f "$DIR/$A_FINIR" ]; then
+    incomplet 12 "Le dossier « $DIR » n'a pas pu être vidé en entier (code $rc_rm ; reste :${autre:- témoin absent})."
+  fi
+elif [ -e "$DIR" ] || [ -L "$DIR" ]; then
   incomplet 12 "Le dossier « $DIR » n'a pas pu être supprimé en entier (code $rc_rm)."
 fi
 # Puis le lien qui y menait, s'il y en avait un.
@@ -508,14 +539,21 @@ if [ -L "$DIR_DEMANDE" ]; then rm -f "$DIR_DEMANDE"; fi
 
 # 4) Les commandes : seulement celles qui lancent CE dossier (`ccp` peut être un autre programme).
 # L'installeur y a écrit le chemin tel qu'il l'avait reçu : on reconnaît aussi bien celui-là que le canonique.
+# Windows : install.sh y écrit le chemin sous la forme C:/Users/… (cygpath -m) quand le canonique est /c/Users/… :
+# les deux formes sont reconnues, sans tenir compte de la casse (le système de fichiers ne la distingue pas).
+# Sans cela, les commandes restaient et le relevé, aveugle de la même façon, ne les voyait pas (15/11/2026).
 for n in baluchon baluchon1 ccp ccp1; do
   f="$BINDIR/$n"
-  if [ -f "$f" ] && { grep -qF "$DIR/Claude.command" "$f" 2>/dev/null || grep -qF "${DIR_DEMANDE%/}/Claude.command" "$f" 2>/dev/null; }; then
-    rm -f "$f"
-  fi
+  [ -f "$f" ] || continue
+  for p in "$DIR" "${DIR_DEMANDE%/}"; do
+    if grep -qF "$p/Claude.command" "$f" 2>/dev/null \
+       || { [ "$WINDOWS" = 1 ] && grep -qiF "$(cygpath -m "$p" 2>/dev/null)/Claude.command" "$f" 2>/dev/null; }; then
+      rm -f "$f"; break
+    fi
+  done
 done
 # Windows : install.ps1 pose aussi baluchon.cmd… qui appellent « <dossier en chemin Windows>\claude.cmd ».
-if command -v cygpath >/dev/null 2>&1; then
+if [ "$WINDOWS" = 1 ]; then
   for n in baluchon baluchon1 ccp ccp1; do
     f="$BINDIR/$n.cmd"
     [ -f "$f" ] || continue
@@ -525,7 +563,11 @@ if command -v cygpath >/dev/null 2>&1; then
   done
 fi
 
-if [ "$CODE_SORTIE" = 0 ]; then
+if [ "$CODE_SORTIE" = 0 ] && [ "$WINDOWS" = 1 ]; then
+  echo "✓ Désinstallé, sauf les outils Git de Baluchon ($DIR/git-win), qui servent encore à ce script."
+  echo "  Lancé depuis le menu : ils partent à sa fermeture. Lancé à la main : supprime « $(cygpath -w "$DIR" 2>/dev/null) » une fois cette fenêtre fermée."
+  echo "  (Pense à révoquer la session sur https://claude.ai si la machine n'est pas la tienne.)"
+elif [ "$CODE_SORTIE" = 0 ]; then
   echo "✓ Désinstallé. Plus aucune trace de Baluchon sur cette machine."
   echo "  (Pense à révoquer la session sur https://claude.ai si la machine n'est pas la tienne.)"
 else

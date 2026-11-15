@@ -412,9 +412,10 @@ quit_wizard() {
 
 # « Partir » : tout effacer et désinstaller, depuis le menu. Proposé seulement si ce dossier se déclare une
 # installation (marqueur) ET porte son désinstalleur : jamais sur une clé qui n'a pas été posée par
-# l'installeur. Pas encore sous Windows (le désinstalleur est un script bash : phase suivante).
+# l'installeur. Windows compris : le désinstalleur y laisse git-win (le bash qui tourne), que le lanceur
+# natif (claude.cmd, install.ps1) retire à la fermeture du menu (voir uninstall.sh, en tête).
 can_leave() {
-  [ "$CC_OS" != win32 ] && cc_est_installation "$ROOT" && [ -f "$ROOT/uninstall.sh" ] && [ ! -L "$ROOT/uninstall.sh" ]
+  cc_est_installation "$ROOT" && [ -f "$ROOT/uninstall.sh" ] && [ ! -L "$ROOT/uninstall.sh" ]
 }
 LEAVE_LABEL="🚪  Partir : tout effacer et désinstaller"
 do_partir() {
@@ -444,7 +445,13 @@ do_partir() {
   # Le dossier n'existe plus (ni gum, ni le noyau, ni la bibliothèque) : à partir d'ici, printf seul, et
   # aucun cc_log (il recréerait logs/ dans le dossier qu'on vient d'effacer).
   trap - EXIT HUP TERM
-  if [ "$code" = 0 ]; then
+  if [ "$code" = 0 ] && [ -n "${CC_DEPART_A_FINIR:-}" ]; then
+    # Windows : tout est effacé et relu, sauf git-win (ce bash). Le lanceur natif le retire dès qu'on sort, puis
+    # relit et dit lui-même « Rien ne reste » : jamais promis ici avant que ce soit vrai.
+    printf '\n  \033[32m✓ Comptes, sessions et commandes effacés.\033[0m\n'
+    printf '  Dernière étape à la fermeture du menu : les outils Git de Baluchon.\n'
+    printf "  Si cet ordinateur n'est pas le tien, révoque aussi la session sur https://claude.ai.\n\n"
+  elif [ "$code" = 0 ]; then
     printf '\n  \033[32m✓ Rien ne reste sur cet ordinateur.\033[0m\n'
     printf "  Si cet ordinateur n'est pas le tien, révoque aussi la session sur https://claude.ai.\n\n"
   else

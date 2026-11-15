@@ -417,11 +417,14 @@ cc_ensure_gum() {
   # (cc_poser) et le fichier POSÉ doit avoir exactement l'empreinte calculée, sinon il est retiré.
   b=""
   if [ "$CC_OS" = win32 ]; then
+    # Membre de l'archive NOMMÉ en entier (version épinglée) : l'unzip natif de Git portable ne
+    # reconnaît pas le motif '*gum.exe' (« filename not matched », mesuré le 15/11/2026 sur Windows 11),
+    # et gum ne s'installait jamais sur Windows.
     asset="gum_${CC_GUM_VER}_${os}_${arch}.zip"
     mkdir -p "$tmp/x" \
       && curl -fsSL "https://github.com/charmbracelet/gum/releases/download/v${CC_GUM_VER}/$asset" -o "$tmp/g.zip" \
       && cc_check_sha "$tmp/g.zip" "$(cc_gum_sha "${os}_${arch}")" \
-      && ( cd "$tmp/x" && unzip -o -j "$tmp/g.zip" '*gum.exe' >/dev/null 2>&1 ) \
+      && ( cd "$tmp/x" && unzip -o -j "$tmp/g.zip" "gum_${CC_GUM_VER}_${os}_${arch}/gum.exe" >/dev/null 2>&1 ) \
       && b="$tmp/x/gum.exe" && [ -f "$b" ] || b=""
   else
     asset="gum_${CC_GUM_VER}_${os}_${arch}.tar.gz"
@@ -1230,18 +1233,40 @@ cc_depart_releve() {
 # Cloudflare Access (seulement si un hôte était connu : sans hôte, rien ne dit qu'il y en a). Écrit
 # CC_DEPART_RESTE (une ligne par reste) ; rend 0 si rien ne reste, 1 sinon. N'écrit nulle part : un
 # journal recréé ici serait lui-même un reste.
+# Windows : un dossier d'installation qui ne contient PLUS que git-win (vrai dossier) et le témoin .baluchon-a-finir
+# posé par uninstall.sh est l'état attendu tant que le bash de git-win tourne (voir uninstall.sh, en tête). Ce n'est
+# pas « rien ne reste » : le lanceur natif (claude.cmd, install.ps1) retire git-win puis le dossier vide, relit et
+# le dit. Toute autre entrée fait de ce dossier un reste ordinaire.
+cc_dossier_a_finir() {
+  local p="$1" e
+  [ "${CC_OS:-}" = win32 ] && [ -d "$p" ] && [ ! -L "$p" ] && [ -f "$p/.baluchon-a-finir" ] \
+    && [ -d "$p/git-win" ] && [ ! -L "$p/git-win" ] || return 1
+  for e in "$p"/* "$p"/.[!.]* "$p"/..?*; do
+    { [ -e "$e" ] || [ -L "$e" ]; } || continue
+    case "${e##*/}" in git-win|.baluchon-a-finir) ;; *) return 1 ;; esac
+  done
+  return 0
+}
+
 cc_depart_verifie() {
   local p n f s h nom re lignes="" cf="$HOME/.cloudflared" nl=$'\n' sr nonverif
+  CC_DEPART_A_FINIR=""
   while IFS= read -r p; do
     [ -n "$p" ] || continue
-    if [ -e "$p" ] || [ -L "$p" ]; then lignes="${lignes}Le dossier $p est encore là.$nl"; fi
+    if [ -e "$p" ] || [ -L "$p" ]; then
+      if cc_dossier_a_finir "$p"; then CC_DEPART_A_FINIR="$p"; else lignes="${lignes}Le dossier $p est encore là.$nl"; fi
+    fi
   done <<< "$CC_DEP_DIRS"
   for n in baluchon baluchon1 ccp ccp1; do
     f="$HOME/.local/bin/$n"
     { [ -f "$f" ] || [ -L "$f" ]; } || continue
     while IFS= read -r p; do
       [ -n "$p" ] || continue
-      if grep -qF "$p/Claude.command" "$f" 2>/dev/null; then lignes="${lignes}La commande $f lance encore Baluchon.$nl"; break; fi
+      # Windows : install.sh écrit C:/Users/… (cygpath -m) ; les deux formes, sans casse (voir uninstall.sh).
+      if grep -qF "$p/Claude.command" "$f" 2>/dev/null \
+         || { command -v cygpath >/dev/null 2>&1 && grep -qiF "$(cygpath -m "$p" 2>/dev/null)/Claude.command" "$f" 2>/dev/null; }; then
+        lignes="${lignes}La commande $f lance encore Baluchon.$nl"; break
+      fi
     done <<< "$CC_DEP_DIRS"
     # Windows : les .cmd d'install.ps1 appellent « <dossier en chemin Windows>\claude.cmd ».
     f="$HOME/.local/bin/$n.cmd"
@@ -1303,7 +1328,8 @@ cc_depart_verifie() {
 # déjà vérifiée à l'installation ; c'est le même niveau que le menu lui-même (qui est cette bibliothèque).
 # Sans interface, sans question : la confirmation est celle du menu.
 # Code de sortie (le détail de ce qui reste est dans CC_DEPART_RESTE et CC_DEPART_NOTE) :
-#   0 = rien ne reste, relu sur le disque ; 14 = rien n'a été fait (désinstalleur absent ou altéré, ou
+#   0 = rien ne reste, relu sur le disque (Windows : sauf le dossier git-win, CC_DEPART_A_FINIR non vide, que le
+#   lanceur natif retire après la fin de bash et relit lui-même) ; 14 = rien n'a été fait (désinstalleur absent ou altéré, ou
 #   manifeste signé absent/invalide) ;
 #   15 = le Trousseau refuse (verrouillé, accès refusé) : l'INSTALLATION EST CONSERVÉE (dossier, profils, commandes,
 #   menu), déverrouille-le puis relance « Partir » ; il n'y a pas de « demi-départ » dont on ne puisse revenir.
@@ -1317,7 +1343,7 @@ cc_depart_verifie() {
 # AUCUN cc_log ici ni après : il recréerait ROOT/logs dans le dossier qu'on vient d'effacer.
 cc_depart() {
   local un="$ROOT/uninstall.sh" tmpd copie want wrc=0 urc=0 code=0 reste=0
-  CC_DEPART_NOTE=""; CC_DEPART_RESTE=""
+  CC_DEPART_NOTE=""; CC_DEPART_RESTE=""; CC_DEPART_A_FINIR=""
   cc_est_installation "$ROOT" && [ -f "$un" ] && [ ! -L "$un" ] \
     || { CC_DEPART_NOTE="Le désinstalleur ($un) est absent : rien n'a été effacé."; return 14; }
   want="$(cc_sum_signee uninstall.sh)" \
