@@ -359,6 +359,9 @@ do_wipe() {
     case "$wrc" in
       0) good "✓ Effacé (Trousseau compris). Révoque les jetons sur claude.ai si la clé a été perdue." ;;
       2) bad "Effacé, mais une session Claude restait ouverte : ferme-la, puis refais « Tout effacer »." ;;
+      3) bad "⚠ Trousseau verrouillé ou inaccessible : RIEN n'a été effacé. Déverrouille-le, puis refais « Tout effacer »."
+         printf '%s\n' "$CC_WIPE_NOTE" | sed 's/^/  /'
+         read -r -p "  Entrée pour revenir au menu… " _ < /dev/tty 2>/dev/null || sleep 8 ;;
       *) bad "⚠ Effacement INCOMPLET : ce qui reste est utilisable."
          printf '%s\n' "$CC_WIPE_NOTE" | sed 's/^/  /'
          read -r -p "  Entrée pour revenir au menu… " _ < /dev/tty 2>/dev/null || sleep 8 ;;
@@ -396,6 +399,7 @@ quit_wizard() {
     case "$prc" in
       0) note "Connexions Claude effacées de cet ordinateur (il faudra te reconnecter la prochaine fois)." ;;
       2) bad "Effacement fait, mais une session Claude restait ouverte : ferme-la et relance baluchon → Quitter pour garantir l'effacement." ;;
+      3) bad "Les fichiers de connexion sont effacés, mais le Trousseau a refusé de supprimer des sessions (verrouillé ?) : déverrouille-le, ouvre « Trousseau d'accès » et supprime les items « Claude Code-credentials-… » de ce portable avant de partir." ;;
       *) bad "Effacement INCOMPLET des connexions : supprime à la main le dossier $ROOT/config avant de partir." ;;
     esac
   fi
@@ -423,8 +427,9 @@ do_partir() {
   note "Effacement en cours…"
   local code=0
   cc_depart || code=$?
-  if [ "$code" = 14 ]; then
-    # Rien n'a été fait (désinstalleur absent ou altéré) : le menu est intact, on y revient.
+  if [ "$code" = 14 ] || [ "$code" = 15 ]; then
+    # Rien n'a été fait (14 : désinstalleur absent ou altéré ; 15 : Trousseau verrouillé ou inaccessible) : le menu
+    # est intact, on y revient. Le 15 se rejoue tel quel une fois le Trousseau déverrouillé.
     bad "$CC_DEPART_NOTE"; sleep 4; return 0
   fi
   # Le dossier n'existe plus (ni gum, ni le noyau, ni la bibliothèque) : à partir d'ici, printf seul, et

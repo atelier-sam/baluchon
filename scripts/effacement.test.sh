@@ -18,6 +18,9 @@
 #    - (revue Codex, 2e passe, HIGH 5) `config` ou un profil qui est un LIEN vers un dossier témoin n'est
 #      jamais suivi : témoin intact, lien laissé en place et signalé, code non nul ; une racine qui est le
 #      domicile, ou un chemin relatif, est refusée avant toute suppression.
+#    - (revue Codex, 4e passe, constat 7) Trousseau macOS (faux `security`, CC_OS=darwin dans le seul bash
+#      d'essai) : verrouillé AVANT l'effacement = code 3 et RIEN n'est touché, la relance après
+#      déverrouillage va au bout ; refusé À la suppression = code 1 et la note nomme le Trousseau.
 #  Contrôle positif : passer l'ANCIEN lib/common.sh en 2e argument doit faire échouer les
 #  épreuves « jetons restants » (il rendait 0 et effaçait remote.conf) et les épreuves 6 à 8 (il suivait
 #  le lien et effaçait le témoin).
@@ -213,6 +216,62 @@ R="$(racine sans-lien-noyau-hostile)"
 o="$(joue "$R" "$LIB" "$HOSTILE")"
 egal "9c. sans lien : le noyau est appelé pour accounts purge" 1 "$(appels_purge)"
 egal "9c. sans lien : code 0" 0 "${o%%|*}"
+
+# 10) (revue Codex, 4e passe, constat 7) Le Trousseau macOS est contrôlé AVANT toute suppression : le nom d'un item se
+# calcule depuis le dossier de son profil, donc un profil supprimé pendant que le Trousseau refuse ne laisse plus de quoi
+# rejouer l'effacement. Un faux `security` (rien d'autre n'est joué : jamais le vrai Trousseau) répond selon FIND_RC et
+# DELETE_RC ; CC_OS est posé à darwin dans le seul bash d'essai.
+SECD="$BASE/faux-security"; mkdir -p "$SECD"
+cat > "$SECD/security" <<'SEC'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")" && pwd)"
+printf '%s\n' "$1" >> "$d/APPELS_SECURITY"
+case "$1" in
+  find-generic-password) exit "$(cat "$d/FIND_RC" 2>/dev/null || echo 44)" ;;
+  delete-generic-password) exit "$(cat "$d/DELETE_RC" 2>/dev/null || echo 44)" ;;
+esac
+exit 1
+SEC
+chmod +x "$SECD/security"
+joue_mac() { # joue_mac <racine> <noyau> : « code|note » de cc_wipe avec CC_OS=darwin et le faux security en tête du PATH
+  mkdir -p "$BASE/domicile-essai"
+  env -i HOME="$BASE/domicile-essai" PATH="$SECD:/usr/bin:/bin" bash -c '
+    ROOT="$1"; . "$2"; CORE="$3"; CC_OS=darwin
+    rc=0; cc_wipe >/dev/null 2>&1 || rc=$?
+    printf "%s|%s" "$rc" "${CC_WIPE_NOTE:-}"
+  ' _ "$1" "$LIB" "$2" 2>/dev/null
+}
+contenu() { ( cd "$1" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$(shasum -a 256 "$f" | cut -c1-16)" "$f"; done ); }
+
+# 10a) Trousseau verrouillé (toute réponse ≠ 0 et ≠ 44) : code 3, RIEN n'est touché, aucun ordre au noyau.
+: > "$BASE/APPELS"; : > "$SECD/APPELS_SECURITY"; printf '36\n' > "$SECD/FIND_RC"; printf '36\n' > "$SECD/DELETE_RC"
+R="$(racine trousseau-verrouille)"; AVANT="$(contenu "$R")"
+o="$(joue_mac "$R" "$HOSTILE")"
+egal "10a. Trousseau verrouillé : code 3" 3 "${o%%|*}"
+case "${o#*|}" in *"Trousseau verrouillé"*"Rien n'a été effacé"*) verdict vrai "10a. …la note dit « Trousseau verrouillé … Rien n'a été effacé »" ;; *) verdict faux "10a. …la note le dit" "${o#*|}" ;; esac
+egal "10a. …RIEN n'est modifié (profils, remote.conf, ACTIVE)" "$AVANT" "$(contenu "$R")"
+egal "10a. …le noyau n'a reçu aucun ordre (ni purge, ni oubli des jetons)" 0 "$(wc -l < "$BASE/APPELS" | tr -d ' ')"
+verdict "$(grep -q delete-generic-password "$SECD/APPELS_SECURITY" && echo faux || echo vrai)" "10a. …aucune suppression du Trousseau n'a été demandée"
+# Déverrouillé : la relance retrouve tout (les profils sont toujours là pour calculer les noms).
+printf '0\n' > "$SECD/FIND_RC"; printf '0\n' > "$SECD/DELETE_RC"
+o="$(joue_mac "$R" "$HOSTILE")"
+egal "10a. …déverrouillé, la relance aboutit (code 0)" 0 "${o%%|*}"
+egal "10a. …et config/ est vidé" "" "$(ls -A "$R/config")"
+
+# 10b) Le pré-contrôle passe (lecture 44), puis la SUPPRESSION est refusée : les fichiers sont traités, le Trousseau est dit
+# (code 1, note « Trousseau »), jamais 0. Le noyau échoue (PURGE_RC=1) pour que le repli bash joue le Trousseau.
+printf '44\n' > "$SECD/FIND_RC"; printf '36\n' > "$SECD/DELETE_RC"; printf '1\n' > "$BASE/PURGE_RC"; printf '0\n' > "$BASE/FORGET_RC"
+R="$(racine trousseau-delete-refuse)"
+o="$(joue_mac "$R" "$FAUX")"
+egal "10b. lecture 44 puis suppression refusée (36) : code 1, jamais 0" 1 "${o%%|*}"
+case "${o#*|}" in *"Trousseau"*) verdict vrai "10b. …la note nomme le Trousseau" ;; *) verdict faux "10b. …la note nomme le Trousseau" "${o#*|}" ;; esac
+verdict "$([ ! -e "$R/config/perso" ] && [ ! -e "$R/config/pro" ] && echo vrai || echo faux)" "10b. …les fichiers de connexion sont effacés quand même"
+
+# 10c) Items absents (44 partout) : succès, code 0.
+printf '44\n' > "$SECD/FIND_RC"; printf '44\n' > "$SECD/DELETE_RC"; printf '1\n' > "$BASE/PURGE_RC"
+R="$(racine trousseau-absent)"
+o="$(joue_mac "$R" "$FAUX")"
+egal "10c. items absents (44) : code 0" 0 "${o%%|*}"
 
 printf '%s ok, %s ko\n' "$OK" "$KO"
 [ "$KO" = 0 ]

@@ -790,13 +790,54 @@ cc_liens_config() {
   return 0
 }
 
+# Services du Trousseau macOS que l'effacement visera : un par config/<profil>, pour le chemin tel que le menu le
+# connaît ET pour son chemin physique s'il diffère (Claude suffixe le nom du service d'après le chemin qu'on lui
+# donne). Un service par ligne ; rien hors macOS. Une seule définition : le relevé de « Partir » et le
+# pré-contrôle du Trousseau la partagent.
+cc_services_trousseau() {
+  local real d cfg base
+  [ "${CC_OS:-}" = darwin ] || return 0
+  real="$(cd -P -- "$ROOT" 2>/dev/null && pwd -P)"
+  for d in "$ROOT"/config/*/; do
+    [ -d "$d" ] || continue
+    cfg="${d%/}"; base="${cfg##*/}"
+    printf 'Claude Code-credentials-%s\n' "$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)"
+    if [ -n "$real" ] && [ "$real" != "$ROOT" ]; then
+      printf 'Claude Code-credentials-%s\n' "$(printf '%s' "$real/config/$base" | shasum -a 256 | cut -c1-8)"
+    fi
+  done
+}
+
+# Le Trousseau répond-il, pour chacun de ces services (un par ligne) ? À jouer AVANT de supprimer quoi que ce
+# soit : le nom d'un service se calcule depuis le dossier du profil, donc un dossier supprimé pendant que le
+# Trousseau refuse (verrouillé, accès refusé, outil absent) laisse des sessions dont plus rien ne dit le nom,
+# et l'effacement ne peut plus être rejoué. 0 = chaque réponse est « présent » (0) ou « absent » (44) ; 1
+# sinon, avec CC_TROUSSEAU_NOTE (la cause, en une ligne). Hors macOS ou sans service : 0.
+# Honnêteté : c'est une LECTURE ; elle prouve que le Trousseau est joignable, pas qu'une suppression
+# réussira ensuite (un refus à ce moment-là est vu par la suppression elle-même, code 3 de cc_purge_sessions).
+cc_trousseau_pret() { # cc_trousseau_pret <services, un par ligne>
+  local s sr
+  CC_TROUSSEAU_NOTE=""
+  [ "${CC_OS:-}" = darwin ] || return 0
+  [ -n "${1:-}" ] || return 0
+  if ! command -v security >/dev/null 2>&1; then CC_TROUSSEAU_NOTE="outil « security » absent"; return 1; fi
+  while IFS= read -r s; do
+    [ -n "$s" ] || continue
+    sr=0; security find-generic-password -s "$s" >/dev/null 2>&1 || sr=$?
+    case "$sr" in 0|44) ;; *) CC_TROUSSEAU_NOTE="réponse $sr de « security »"; return 1 ;; esac
+  done <<< "$1"
+  return 0
+}
+
 # Efface les sessions de CE portable : Trousseau macOS (services suffixés
 # seulement, jamais la session Claude Code normale de la machine) ET identifiants
 # en fichier (seul magasin sous Windows/Linux). Passe par le noyau ; le repli
 # bash couvre le cas « noyau absent », sinon un poste invité garderait tout.
 # Rend 0 seulement si tout ce qui existait a été effacé.
 # Code retour : 0 = tout effacé ; 2 = effacé mais une session ou un renouvellement
-# encore vivant pourrait réécrire des identifiants (code 11 du noyau) ; 1 = échec.
+# encore vivant pourrait réécrire des identifiants (code 11 du noyau) ; 3 = les fichiers
+# sont traités mais le Trousseau a refusé une suppression (verrouillé ?) : des sessions
+# y restent, et ce code prime sur 1 ; 1 = autre échec.
 cc_purge_sessions() {
   local core_rc=0
   # Jamais sur une racine douteuse, ni à travers un lien : le noyau et le repli ci-dessous suivraient
@@ -804,7 +845,7 @@ cc_purge_sessions() {
   cc_racine_sure || { cc_warn "Racine d'effacement refusée ($ROOT) : rien n'est effacé."; return 1; }
   cc_liens_config "$CC_ROOT_REAL"
   if [ "$CC_LIENS" = config ]; then cc_warn "config est un lien symbolique : il n'est jamais suivi, rien n'est effacé."; return 1; fi
-  local d cfg f rc=0 sr
+  local d cfg f rc=0 sr trk=0
   if [ -n "$CC_LIENS" ]; then
     # Le noyau n'est PAS appelé (voir cc_liens_config) : les vrais profils passent par le repli ci-dessous, qui
     # dit chaque lien (config/<nom> est un lien symbolique…) ; le code retour n'est plus 0.
@@ -821,7 +862,7 @@ cc_purge_sessions() {
       # 0 = supprimé, 44 = l'item n'existait pas : les deux disent « il n'y en a plus ». Toute autre
       # réponse (Trousseau verrouillé, accès refusé, outil absent) n'établit RIEN : échec.
       security delete-generic-password -s "Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)" >/dev/null 2>&1; sr=$?
-      case "$sr" in 0|44) ;; *) rc=1 ;; esac
+      case "$sr" in 0|44) ;; *) rc=1; trk=1 ;; esac
     fi
     # Même liste que core/src/purge.rs : journal, sa réservation (peut contenir
     # des jetons neufs) et les temporaires d'écriture atomique.
@@ -832,6 +873,9 @@ cc_purge_sessions() {
       [ -e "$cfg/$f" ] && rc=1
     done
   done
+  # Une session qui reste au Trousseau est dite à part (3) : le remède n'est pas le même (déverrouiller),
+  # et les fichiers, eux, ont été traités.
+  [ "$trk" = 0 ] || return 3
   return "$rc"
 }
 # Ancien nom, gardé pour les appelants existants.
@@ -840,7 +884,10 @@ cc_purge_keychain() { cc_purge_sessions; }
 # Cloudflare Access que la liaison avec le Mac a laissés dans ~/.cloudflared.
 # Code retour (ce qui RESTE est dit dans CC_WIPE_NOTE, jamais avalé) :
 #   0 = tout effacé ; 2 = effacé, mais une session Claude encore ouverte peut réécrire ses
-#   identifiants ; 10 = des jetons Cloudflare Access restent UTILISABLES ; 1 = sessions mal effacées.
+#   identifiants ; 10 = des jetons Cloudflare Access restent UTILISABLES ; 1 = sessions mal effacées ;
+#   3 = le Trousseau ne répond pas (verrouillé, accès refusé) : RIEN n'a été effacé, déverrouille-le
+#   puis refais (pré-contrôle ci-dessous : un dossier de profil supprimé pendant que le Trousseau refuse
+#   ne laisse plus de quoi rejouer l'effacement).
 # WHY : avant, les deux échecs étaient ignorés et le menu affichait « ✓ Effacé » ; sur un poste
 # prêté, un jeton Access resté en place rouvrait la liaison avec le Mac (même défaut que celui
 # que la revue Codex avait trouvé dans uninstall.sh).
@@ -857,7 +904,17 @@ cc_wipe() {
   fi
   cfg="$CC_ROOT_REAL/config"
   [ ! -L "$ROOT/config" ] && [ ! -L "$cfg" ] || lien_cfg=1
+  # AVANT toute suppression : le Trousseau répond-il ? Sinon on s'arrête là, rien n'est touché.
+  if [ "$lien_cfg" = 0 ] && ! cc_trousseau_pret "$(cc_services_trousseau)"; then
+    CC_WIPE_NOTE="Trousseau verrouillé ou inaccessible (${CC_TROUSSEAU_NOTE}) : déverrouille-le puis refais l'effacement. Rien n'a été effacé."
+    return 3
+  fi
   cc_purge_keychain || prc=$?
+  if [ "$prc" = 3 ]; then
+    # Le pré-contrôle a passé, puis le Trousseau a refusé une suppression (verrouillé entre-temps).
+    prc=1
+    CC_WIPE_NOTE="Des sessions restent au Trousseau (il a refusé la suppression : verrouillé ?). Les fichiers de connexion, eux, sont effacés : ouvre « Trousseau d'accès » et supprime à la main les items « Claude Code-credentials-… » de ce portable."
+  fi
   # Hôtes d'accès que l'amorce a signalés parce que leurs jetons pouvaient rester (.baluchon-acces) :
   # ils ne sont pas dans remote.conf, donc le `forget-access` nu ne les verrait jamais.
   autres="$(cc_acces_hotes_notes)"
@@ -1136,21 +1193,11 @@ cc_cache_liste() {
 # service d'après le chemin qu'on lui donne), CC_DEP_HOTES et CC_DEP_CACHES (copies d'exécution notées
 # par cette installation). Une valeur par ligne.
 cc_depart_releve() {
-  local real d cfg base
+  local real
   CC_DEP_DIRS="$ROOT"
   real="$(cd -P -- "$ROOT" 2>/dev/null && pwd -P)"
   if [ -n "$real" ] && [ "$real" != "$ROOT" ]; then CC_DEP_DIRS="$CC_DEP_DIRS"$'\n'"$real"; fi
-  CC_DEP_SERVICES=""
-  if [ "${CC_OS:-}" = darwin ]; then
-    for d in "$ROOT"/config/*/; do
-      [ -d "$d" ] || continue
-      cfg="${d%/}"; base="${cfg##*/}"
-      CC_DEP_SERVICES="$CC_DEP_SERVICES"$'\n'"Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)"
-      if [ -n "$real" ] && [ "$real" != "$ROOT" ]; then
-        CC_DEP_SERVICES="$CC_DEP_SERVICES"$'\n'"Claude Code-credentials-$(printf '%s' "$real/config/$base" | shasum -a 256 | cut -c1-8)"
-      fi
-    done
-  fi
+  CC_DEP_SERVICES="$(cc_services_trousseau)"
   CC_DEP_HOTES="$(cc_acces_hotes)"
   CC_DEP_CACHES="$(cc_cache_liste)"
 }
@@ -1227,6 +1274,8 @@ cc_depart_verifie() {
 # Code de sortie (le détail de ce qui reste est dans CC_DEPART_RESTE et CC_DEPART_NOTE) :
 #   0 = rien ne reste, relu sur le disque ; 14 = rien n'a été fait (désinstalleur absent ou altéré, ou
 #   manifeste signé absent/invalide) ;
+#   15 = le Trousseau ne répond pas (verrouillé, accès refusé) : rien n'a été effacé, déverrouille-le puis
+#   relance (pré-contrôle avant tout effacement : le nom d'un service se calcule depuis le dossier du profil) ;
 #   2, 10, 11, 12 = codes d'uninstall.sh (refusé, jetons Access, purge incomplète, dossier non supprimé) ;
 #   2 aussi si cc_wipe a vu une session Claude encore ouverte ; 1, 10 = codes de cc_wipe quand le
 #   désinstalleur n'a pas pu les corriger ; 13 = il reste quelque chose que personne n'avait signalé.
@@ -1246,12 +1295,30 @@ cc_depart() {
     CC_DEPART_NOTE="Le désinstalleur n'a pas l'empreinte que la release signe (altéré, ou modifié pendant que le menu était ouvert) : rien n'a été effacé."; return 14
   fi
   cc_depart_releve
+  # Le Trousseau doit répondre AVANT que le moindre profil soit supprimé : sinon des sessions y resteraient,
+  # sous un nom que plus aucun dossier ne permet de recalculer, et « Partir » ne pourrait plus être rejoué.
+  if ! cc_trousseau_pret "$CC_DEP_SERVICES"; then
+    rm -rf "$tmpd"
+    CC_DEPART_NOTE="Trousseau verrouillé ou inaccessible (${CC_TROUSSEAU_NOTE}) : déverrouille-le puis relance « Partir ». Rien n'a été effacé."
+    return 15
+  fi
   cc_wipe || wrc=$?
   CC_DEPART_NOTE="${CC_WIPE_NOTE:-}"
+  if [ "$wrc" = 3 ]; then
+    # Le Trousseau a répondu au relevé puis plus à l'effacement (verrouillé entre-temps) : rien n'est supprimé.
+    rm -rf "$tmpd"
+    return 15
+  fi
   # Le dossier courant ne doit pas être celui qu'on supprime.
   cd / 2>/dev/null || true
   BALUCHON_DIR="$ROOT" bash "$copie" --oui < /dev/null > /dev/null || urc=$?
   rm -rf "$tmpd"
+  # Le désinstalleur a son propre pré-contrôle du Trousseau (code 15, « rien n'est supprimé ») : ici cc_wipe a
+  # déjà tourné, ce serait faux. Le Trousseau a donc lâché entre les deux : c'est une purge incomplète.
+  if [ "$urc" = 15 ]; then
+    urc=11
+    CC_DEPART_NOTE="${CC_DEPART_NOTE}${CC_DEPART_NOTE:+$'\n'}Le Trousseau a cessé de répondre pendant l'effacement : des sessions peuvent y rester (verrouillé ?)."
+  fi
   # Le disque relu fait foi : le désinstalleur refait lui-même la purge et l'oubli des jetons, donc un
   # échec de cc_wipe suivi d'une désinstallation complète n'est plus un échec. Ce que le disque ne voit
   # pas (une session Claude encore ouverte, qui peut réécrire ses identifiants) vient des codes 2 et 11.

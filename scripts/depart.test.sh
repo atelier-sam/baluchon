@@ -23,8 +23,10 @@
 #    - lien symbolique, hôte d'accès noté par l'amorce (.baluchon-acces) ;
 #    - (revue Codex, 2e passe) le désinstalleur n'est exécuté que s'il a l'empreinte du manifeste SIGNÉ conservé
 #      par l'installation (remplacé pendant le menu, manifeste forgé, illisible : jamais exécuté, c'est dit) ;
-#      `config` est un lien : jamais suivi ; Trousseau verrouillé : « sessions non vérifiées », jamais « Rien ne
-#      reste » ; cache d'exécution (~/.cache/baluchon) retiré avec des bornes sûres ou nommé s'il reste.
+#      `config` est un lien : jamais suivi ; Trousseau verrouillé AVANT l'effacement : code 15, rien n'est supprimé
+#      et la relance après déverrouillage va au bout (4e passe) ; verrouillé PENDANT l'effacement : « sessions non
+#      vérifiées », jamais « Rien ne reste » ; cache d'exécution (~/.cache/baluchon) retiré avec des bornes sûres
+#      ou nommé s'il reste.
 #  Contrôles positifs : l'ANCIEN Claude.command (c0172f7) ne propose pas « Partir » ; l'ANCIEN code (1238b14) exécute
 #  un désinstalleur remplacé, suit un lien sur `config`, lit un Trousseau verrouillé comme « absent » et oublie le
 #  cache : chaque épreuve nouvelle échouerait contre lui.
@@ -154,12 +156,15 @@ cat > "$FAUX/security" <<'SEC'
 #!/usr/bin/env bash
 # Faux Trousseau : CTL/trousseau (un service par ligne) ; CTL/trousseau-refus = les suppressions échouent ;
 # CTL/trousseau-ment = « supprimé » (0) sans rien retirer ; CTL/trousseau-verrouille = TOUT répond 36 (Trousseau
-# verrouillé : ni présent ni absent) ; CTL/trousseau-find-verrouille = seule la lecture répond 36.
+# verrouillé : ni présent ni absent) ; CTL/trousseau-find-verrouille = seule la lecture répond 36 ;
+# CTL/trousseau-find-verrouille-apres = la lecture ne répond 36 qu'APRÈS la première suppression (le Trousseau se
+# verrouille pendant l'effacement : le pré-contrôle a passé, la relecture finale ne le peut plus).
 c="${GUM_CTL:?}"; f="$c/trousseau"; sub="${1:-}"; shift || true
 svc=""; while [ $# -gt 0 ]; do [ "$1" = -s ] && { svc="$2"; shift; }; shift; done
 case "$sub" in
   find-generic-password)
     [ ! -e "$c/trousseau-verrouille" ] && [ ! -e "$c/trousseau-find-verrouille" ] || exit 36
+    if [ -e "$c/trousseau-find-verrouille-apres" ] && [ -s "$c/security.log" ]; then exit 36; fi
     grep -qxF -- "$svc" "$f" 2>/dev/null && exit 0; exit 44 ;;
   delete-generic-password)
     echo "delete $svc" >> "$c/security.log"
@@ -301,21 +306,58 @@ if [ "$TROUSSEAU" = 1 ]; then
 
   # (revue Codex, 2e passe, MED 7) Trousseau VERROUILLÉ : ni `delete` ni `find` ne répondent « absent » (44),
   # ils répondent une erreur. Avant : l'erreur valait « il n'y est plus » et « Rien ne reste » s'affichait.
+  # (revue Codex, 4e passe, constat 7) Le Trousseau est contrôlé AVANT toute suppression : un profil supprimé pendant
+  # que le Trousseau refuse laisse des sessions dont plus aucun dossier ne dit le nom, et « Partir » ne peut plus être
+  # rejoué. Verrouillé : code 15, RIEN n'est effacé, le menu revient ; déverrouillé, la relance va jusqu'au bout.
   monde trousseau-verrouille
   : > "$CTL/trousseau-verrouille"
+  choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  egal "3. Trousseau verrouillé : le menu revient et se ferme (code 0)" 0 "$RC"
+  dit "3. …c'est dit : Trousseau verrouillé" "Trousseau verrouillé ou inaccessible"
+  dit "3. …et que rien n'a été effacé" "Rien n'a été effacé"
+  ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
+  vrai_si "3. …RIEN n'est supprimé : les deux profils, le menu, le désinstalleur et les jetons Access sont là" \
+    test -f "$R/config/perso/.credentials.json" -a -f "$R/config/pro/.credentials.json" -a -f "$R/Claude.command" -a -f "$R/uninstall.sh" -a -n "$(ls -A "$H/.cloudflared")"
+  vrai_si "3. …le Trousseau n'a reçu AUCUNE demande de suppression" test ! -s "$CTL/security.log"
+  egal "3. …et garde ses trois items" 3 "$(wc -l < "$CTL/trousseau" | tr -d ' ')"
+  vrai_si "3. …les commandes baluchon sont toujours là" test -e "$H/.local/bin/baluchon"
+  rm -f "$CTL/trousseau-verrouille"
   choix Partir; printf '0\n' > "$CTL/confirm-rc"
   joue
-  vrai_si "3. Trousseau verrouillé : le code n'est JAMAIS 0" test "$RC" != 0
-  ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
-  dit "3. …les sessions du Trousseau sont dites NON VÉRIFIÉES" "sessions non vérifiées"
-  # Le désinstalleur a pu tout effacer, mais la RELECTURE finale est impossible (verrou) : même honnêteté.
+  egal "3. …Trousseau déverrouillé, on relance « Partir » : code 0" 0 "$RC"
+  dit "3. …et « Rien ne reste »" "Rien ne reste"
+  vrai_si "3. …le dossier a disparu" test ! -e "$R"
+  egal "3. …et il ne reste que la session du Claude Code NORMAL au Trousseau" "Claude Code-credentials" "$(cat "$CTL/trousseau")"
+  # Même verdict quand seule la LECTURE répond une erreur (le pré-contrôle est une lecture).
   monde trousseau-lecture-verrouillee
   : > "$CTL/trousseau-find-verrouille"
+  choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  dit "3. lecture du Trousseau en erreur avant l'effacement : « Trousseau verrouillé », rien n'est effacé" "Trousseau verrouillé ou inaccessible"
+  vrai_si "3. …profils et menu sont intacts" test -f "$R/config/perso/.credentials.json" -a -f "$R/Claude.command"
+  # Le Trousseau répond au pré-contrôle, puis se verrouille PENDANT l'effacement : le désinstalleur a pu tout effacer, mais
+  # la RELECTURE finale est impossible (verrou) : on ne dit pas « Rien ne reste ».
+  monde trousseau-lecture-apres
+  : > "$CTL/trousseau-find-verrouille-apres"
   choix Partir; printf '0\n' > "$CTL/confirm-rc"
   joue
-  egal "3. relecture du Trousseau impossible (verrou) : code 13 (jamais 0)" 13 "$RC"
+  egal "3. Trousseau verrouillé PENDANT l'effacement (relecture impossible) : code 13 (jamais 0)" 13 "$RC"
   dit "3. …dit « sessions non vérifiées »" "sessions non vérifiées"
   ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
+  # Contrôle positif du pré-contrôle : l'ANCIEN code (af1d389, avant cette passe) supprimait les profils et le dossier
+  # alors que le Trousseau était verrouillé : le nom des items n'existait plus nulle part, « Partir » ne se rejouait plus.
+  ANCIEN_P6=af1d389; AN6="$BASE/anciens-fichiers-p6"; mkdir -p "$AN6"
+  if git -C "$DEPOT" show "$ANCIEN_P6:lib/common.sh" > "$AN6/common.sh" 2>/dev/null && git -C "$DEPOT" show "$ANCIEN_P6:uninstall.sh" > "$AN6/uninstall.sh" 2>/dev/null \
+     && git -C "$DEPOT" show "$ANCIEN_P6:Claude.command" > "$AN6/Claude.command" 2>/dev/null && [ -s "$AN6/common.sh" ]; then
+    MONDE_LIB="$AN6/common.sh" MONDE_UN="$AN6/uninstall.sh" monde ancien-trousseau-p6 "$AN6/Claude.command"
+    : > "$CTL/trousseau-verrouille"
+    choix Partir; printf '0\n' > "$CTL/confirm-rc"
+    joue
+    vrai_si "3. CONTRÔLE POSITIF : l'ancien code supprimait les profils et le dossier malgré un Trousseau verrouillé" test ! -e "$R/config/perso" -a ! -e "$R/config/pro"
+  else
+    echo "(!) historique git absent : le contrôle positif du pré-contrôle ($ANCIEN_P6) est sauté"
+  fi
   # Contrôle positif : l'ANCIEN code (1238b14) lisait cette même erreur comme « absent » et annonçait « Rien ne reste ».
   ANCIEN_REV=1238b14; AN="$BASE/anciens-fichiers"; mkdir -p "$AN"
   if git -C "$DEPOT" show "$ANCIEN_REV:lib/common.sh" > "$AN/common.sh" 2>/dev/null && git -C "$DEPOT" show "$ANCIEN_REV:uninstall.sh" > "$AN/uninstall.sh" 2>/dev/null \

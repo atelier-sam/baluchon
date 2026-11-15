@@ -23,8 +23,9 @@
 #  Codes de sortie : 0 = tout est effacé ; 1 = rien à désinstaller ou annulé ; 2 = refusé (rien n'est
 #  supprimé) ; 10 = des jetons Cloudflare Access restent utilisables ; 11 = la purge des sessions
 #  est incomplète (dont : Trousseau illisible, config en lien) ; 12 = le dossier ou un cache d'exécution
-#  n'a pas pu être supprimé en entier. Un code 10, 11 ou 12 dit ce qui reste, sur la sortie d'erreur :
-#  jamais « Plus aucune trace » dans ce cas.
+#  n'a pas pu être supprimé en entier ; 15 = le Trousseau (macOS) ne répond pas : RIEN n'est supprimé,
+#  déverrouille-le puis relance (contrôlé avant toute suppression). Un code 10, 11 ou 12 dit ce qui reste,
+#  sur la sortie d'erreur : jamais « Plus aucune trace » dans ce cas.
 # ============================================================
 set -uo pipefail
 DIR_DEMANDE="${BALUCHON_DIR:-$HOME/.baluchon}"
@@ -227,6 +228,24 @@ incomplet() { # incomplet <code> <texte>
   BILAN="${BILAN}${BILAN:+$'\n'}$2"
 }
 indente() { printf '%s\n' "$1" | sed 's/^/      /' | head -n 20; }
+
+# 0) macOS : le Trousseau répond-il ? AVANT de supprimer quoi que ce soit (le crochet de la couche, le noyau et
+# `rm -rf` viennent après). Le nom d'un item du Trousseau se calcule depuis le dossier de son profil : un dossier
+# supprimé pendant que le Trousseau refuse (verrouillé, accès refusé) laisse des sessions dont plus rien ne dit le
+# nom, et l'effacement ne peut plus être rejoué. Rien n'est donc touché : code 15, déverrouille puis relance.
+# 0 (présent) et 44 (absent) disent « le Trousseau répond » ; toute autre réponse, y compris « security » absent.
+if [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ] && [ ! -L "$DIR/config" ]; then
+  verifie_ou_refuse
+  for d in "$DIR"/config/*/; do
+    [ -d "$d" ] || continue
+    svc="Claude Code-credentials-$(printf '%s' "${d%/}" | shasum -a 256 | cut -c1-8)"
+    sr=0; security find-generic-password -s "$svc" >/dev/null 2>&1 || sr=$?
+    case "$sr" in
+      0|44) ;;
+      *) printf '✗ Trousseau verrouillé ou inaccessible (réponse %s de « security ») : déverrouille-le puis relance. Rien n'"'"'est supprimé.\n' "$sr" >&2; exit 15 ;;
+    esac
+  done
+fi
 
 # 1) Le crochet de la couche défait ce que la couche a posé hors de overlay/.
 # Il n'est lancé que s'il a l'empreinte notée par l'amorce (voir authentique) ; sinon il est DIT, car ce qu'il

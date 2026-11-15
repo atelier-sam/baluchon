@@ -89,8 +89,10 @@ FAUX="$BASE/faux-bin"
 JOURNAL_SECURITY="$BASE/security.log"
 JOURNAL_NOYAU="$BASE/noyau.log"
 mkdir -p "$FAUX"
-# Réponse du faux `security` : celle de $BASE/security-rc (défaut 0). 44 = l'item n'existe pas ; 36 = Trousseau verrouillé.
-printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit "$(cat "%s/security-rc" 2>/dev/null || echo 0)"\n' "$JOURNAL_SECURITY" "$BASE" > "$FAUX/security"
+# Réponse du faux `security` : celle de $BASE/security-rc-<sous-commande> si ce fichier existe (lecture et
+# suppression peuvent répondre autrement), sinon celle de $BASE/security-rc (défaut 0). 44 = l'item n'existe
+# pas ; 36 = Trousseau verrouillé.
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\nexit "$(cat "%s/security-rc-$1" 2>/dev/null || cat "%s/security-rc" 2>/dev/null || echo 0)"\n' "$JOURNAL_SECURITY" "$BASE" "$BASE" > "$FAUX/security"
 chmod +x "$FAUX/security"
 
 # ── Un domicile jetable, avec des TÉMOINS qui ne doivent jamais disparaître ──────────────────────────
@@ -563,18 +565,41 @@ NOYAU
   [ ! -e "$I" ] && verdict vrai "11a2. …l'installation est supprimée (le lien avec, sans entrer dans sa cible)" || verdict faux "11a2. …l'installation est supprimée"
 fi
 # 11b. Trousseau (macOS) : 0 et 44 = « il n'y en a plus » ; toute autre réponse n'établit RIEN.
+# 11b-1. Il est contrôlé AVANT toute suppression (code 15) : le nom d'un item se calcule depuis le dossier de son
+# profil, donc un profil supprimé pendant que le Trousseau refuse ne laisse plus de quoi rejouer l'effacement.
 if [ "$(uname -s)" = Darwin ]; then
   printf '36\n' > "$BASE/security-rc"
   I="$BASE/trousseau-verrouille"; faire_install "$I"
+  : > "$JOURNAL_SECURITY"; : > "$JOURNAL_NOYAU"
   lancer "$I"
-  [ "$LAST_RC" -eq 11 ] && verdict vrai "Trousseau qui répond 36 (verrouillé) : code 11, jamais pris pour une absence" || verdict faux "Trousseau verrouillé : code 11" "$LAST_RC $LAST_OUT"
-  case "$LAST_OUT" in *"ni son absence établie"*) verdict vrai "…le bilan dit que l'absence n'est pas établie" ;; *) verdict faux "…le bilan dit que l'absence n'est pas établie" "$LAST_OUT" ;; esac
-  case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "…jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "…jamais « Plus aucune trace »" ;; esac
+  [ "$LAST_RC" -eq 15 ] && verdict vrai "11b. Trousseau qui répond 36 (verrouillé) : code 15, jamais pris pour une absence" || verdict faux "11b. Trousseau verrouillé : code 15" "$LAST_RC $LAST_OUT"
+  case "$LAST_OUT" in *"Trousseau verrouillé"*"Rien n'est supprimé"*) verdict vrai "11b. …le message dit que le Trousseau est verrouillé et que rien n'est supprimé" ;; *) verdict faux "11b. …le message dit « Trousseau verrouillé … Rien n'est supprimé »" "$LAST_OUT" ;; esac
+  [ -f "$I/config/p1/.credentials.json" ] && [ -f "$I/.baluchon-install" ] && [ -x "$I/bin/plat/baluchon-core" ] && [ -f "$I/Claude.command" ] \
+    && verdict vrai "11b. …RIEN n'est supprimé : profil, marqueur, noyau et menu sont là" || verdict faux "11b. …rien n'est supprimé" "$(find "$I" 2>/dev/null)"
+  ! grep -q 'delete-generic-password' "$JOURNAL_SECURITY" && verdict vrai "11b. …aucune suppression du Trousseau n'a été demandée" || verdict faux "11b. …aucune suppression du Trousseau demandée" "$(cat "$JOURNAL_SECURITY")"
+  [ ! -s "$JOURNAL_NOYAU" ] && verdict vrai "11b. …le noyau n'a reçu aucun ordre (ni purge, ni oubli des jetons)" || verdict faux "11b. …le noyau n'a reçu aucun ordre" "$(cat "$JOURNAL_NOYAU")"
+  case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "11b. …jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "11b. …jamais « Plus aucune trace »" ;; esac
   if [ "$A_ANCIEN" = 1 ]; then
-    I="$BASE/trousseau-verrouille-ancien"; faire_install "$I"
-    SCRIPT_SOUS_TEST="$ANCIEN" lancer "$I"
-    case "$LAST_OUT" in *"Plus aucune trace"*) verdict vrai "CONTRÔLE POSITIF : l'ANCIEN script annonçait « Plus aucune trace » malgré un Trousseau illisible" ;; *) verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû mentir" "$LAST_RC $LAST_OUT" ;; esac
+    J="$BASE/trousseau-verrouille-ancien"; faire_install "$J"
+    SCRIPT_SOUS_TEST="$ANCIEN" lancer "$J"
+    case "$LAST_OUT" in *"Plus aucune trace"*) verdict vrai "11b. CONTRÔLE POSITIF : l'ANCIEN script annonçait « Plus aucune trace » malgré un Trousseau illisible" ;; *) verdict faux "11b. CONTRÔLE POSITIF : l'ancien script aurait dû mentir" "$LAST_RC $LAST_OUT" ;; esac
+    [ ! -e "$J" ] && verdict vrai "11b. …et il avait supprimé l'installation (les profils, donc le nom des items) : le cas qu'on ne pouvait plus rejouer" || verdict faux "11b. …l'ancien script avait supprimé l'installation"
   fi
+  # La relance après déverrouillage retrouve tout : le Trousseau répond, l'effacement va jusqu'au bout.
+  printf '0\n' > "$BASE/security-rc"
+  : > "$JOURNAL_SECURITY"
+  lancer "$I"
+  [ "$LAST_RC" -eq 0 ] && verdict vrai "11b. …Trousseau déverrouillé, on relance : l'effacement aboutit (code 0)" || verdict faux "11b. …relance après déverrouillage : code 0" "$LAST_RC $LAST_OUT"
+  [ ! -e "$I" ] && grep -q 'delete-generic-password' "$JOURNAL_SECURITY" && verdict vrai "11b. …l'installation est supprimée et l'item du Trousseau demandé à l'effacement" || verdict faux "11b. …installation supprimée, item effacé" "$(cat "$JOURNAL_SECURITY")"
+  # 11b-2. La lecture répond mais la SUPPRESSION est refusée (Trousseau verrouillé entre les deux) : le pré-contrôle
+  # a passé, l'effacement va au bout comme avant et le bilan dit que des sessions restent (code 11).
+  printf '0\n' > "$BASE/security-rc-find-generic-password"; printf '36\n' > "$BASE/security-rc-delete-generic-password"
+  I="$BASE/trousseau-delete-refuse"; faire_install "$I"
+  lancer "$I"
+  [ "$LAST_RC" -eq 11 ] && verdict vrai "11b2. lecture 0 puis suppression refusée (36) : code 11, jamais pris pour une absence" || verdict faux "11b2. suppression refusée : code 11" "$LAST_RC $LAST_OUT"
+  case "$LAST_OUT" in *"ni son absence établie"*) verdict vrai "11b2. …le bilan dit que l'absence n'est pas établie" ;; *) verdict faux "11b2. …le bilan dit que l'absence n'est pas établie" "$LAST_OUT" ;; esac
+  case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "11b2. …jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "11b2. …jamais « Plus aucune trace »" ;; esac
+  rm -f "$BASE/security-rc-find-generic-password" "$BASE/security-rc-delete-generic-password"
   printf '44\n' > "$BASE/security-rc"
   I="$BASE/trousseau-absent"; faire_install "$I"
   lancer "$I"
