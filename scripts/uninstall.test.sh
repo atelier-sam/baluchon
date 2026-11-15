@@ -33,6 +33,12 @@
 #      qui répond autre chose que 0 ou 44 n'est pas « absent » (code 11) ; le cache d'exécution noté dans
 #      .baluchon-cache est retiré avec ses bornes (jamais une ligne hostile, jamais à travers un lien, code 12).
 #      Chaque épreuve nouvelle est rejouée contre l'ANCIEN script (contrôle positif).
+#    - (re-revue Codex, constat 7, phase 1d, sections 11b0 et 11b2) le Trousseau doit être DÉVERROUILLÉ, pas seulement
+#      lisible : `security show-keychain-info` ≠ 0 (36 = verrouillé) refuse avant toute suppression (code 15) même quand la
+#      lecture répond ; un item dont la SUPPRESSION est refusée (36, 51) laisse l'installation EN PLACE (code 15, profils
+#      conservés, commandes aussi) pour que l'effacement se rejoue, et la relance « déverrouillée » va au bout. Contrôle
+#      négatif : `UN_A_EPROUVER=<uninstall.sh de 0cc9c24>` fait échouer ces épreuves. FAUX `security` seulement : le vrai
+#      Trousseau n'est jamais touché, son comportement réel sous verrou (36) est tenu pour acquis, non éprouvé.
 #    La signature du manifeste se vérifie avec la clé épinglée dans uninstall.sh : l'essai pose une clé JETABLE à
 #    sa place (copie re-clée du script, la seule ligne CCP_SIGNER= change), jamais la clé du produit.
 #
@@ -591,20 +597,69 @@ if [ "$(uname -s)" = Darwin ]; then
   lancer "$I"
   [ "$LAST_RC" -eq 0 ] && verdict vrai "11b. …Trousseau déverrouillé, on relance : l'effacement aboutit (code 0)" || verdict faux "11b. …relance après déverrouillage : code 0" "$LAST_RC $LAST_OUT"
   [ ! -e "$I" ] && grep -q 'delete-generic-password' "$JOURNAL_SECURITY" && verdict vrai "11b. …l'installation est supprimée et l'item du Trousseau demandé à l'effacement" || verdict faux "11b. …installation supprimée, item effacé" "$(cat "$JOURNAL_SECURITY")"
-  # 11b-2. La lecture répond mais la SUPPRESSION est refusée (Trousseau verrouillé entre les deux) : le pré-contrôle
-  # a passé, l'effacement va au bout comme avant et le bilan dit que des sessions restent (code 11).
-  printf '0\n' > "$BASE/security-rc-find-generic-password"; printf '36\n' > "$BASE/security-rc-delete-generic-password"
-  I="$BASE/trousseau-delete-refuse"; faire_install "$I"
+  # 11b-0. (Phase 1d) Un Trousseau VERROUILLÉ peut quand même répondre à la LECTURE (find-generic-password sans -w : une
+  # recherche d'attributs n'exige pas le déverrouillage) ; seule la suppression l'exige. `security show-keychain-info`
+  # (0 = déverrouillé, 36 = verrouillé) le dit AVANT tout geste : refus (code 15), rien n'est supprimé. FAUX `security`
+  # seulement (jamais le vrai Trousseau) : ce que fait le vrai show-keychain-info sur un Trousseau verrouillé est tenu
+  # pour acquis (36), non éprouvé ici.
+  printf '0\n' > "$BASE/security-rc"; printf '36\n' > "$BASE/security-rc-show-keychain-info"
+  I="$BASE/trousseau-info-verrouille"; faire_install "$I"
+  printf '#!/usr/bin/env bash\nexec "%s/Claude.command" "$@"\n' "$I" > "$H/.local/bin/baluchon"; chmod +x "$H/.local/bin/baluchon"
+  : > "$JOURNAL_SECURITY"; : > "$JOURNAL_NOYAU"
   lancer "$I"
-  [ "$LAST_RC" -eq 11 ] && verdict vrai "11b2. lecture 0 puis suppression refusée (36) : code 11, jamais pris pour une absence" || verdict faux "11b2. suppression refusée : code 11" "$LAST_RC $LAST_OUT"
-  case "$LAST_OUT" in *"ni son absence établie"*) verdict vrai "11b2. …le bilan dit que l'absence n'est pas établie" ;; *) verdict faux "11b2. …le bilan dit que l'absence n'est pas établie" "$LAST_OUT" ;; esac
-  case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "11b2. …jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "11b2. …jamais « Plus aucune trace »" ;; esac
-  rm -f "$BASE/security-rc-find-generic-password" "$BASE/security-rc-delete-generic-password"
-  printf '44\n' > "$BASE/security-rc"
+  [ "$LAST_RC" -eq 15 ] && verdict vrai "11b0. lecture 0 mais show-keychain-info 36 (verrouillé) : code 15" || verdict faux "11b0. show-keychain-info 36 : code 15" "$LAST_RC $LAST_OUT"
+  case "$LAST_OUT" in *"Trousseau verrouillé"*"show-keychain-info"*"Rien n'est supprimé"*) verdict vrai "11b0. …le message dit « Trousseau verrouillé », nomme show-keychain-info et dit que rien n'est supprimé" ;; *) verdict faux "11b0. …le message" "$LAST_OUT" ;; esac
+  [ -f "$I/config/p1/.credentials.json" ] && [ -f "$I/.baluchon-install" ] && [ -x "$I/bin/plat/baluchon-core" ] && [ -f "$I/Claude.command" ] && [ -e "$H/.local/bin/baluchon" ] \
+    && verdict vrai "11b0. …RIEN n'est supprimé : profil, marqueur, noyau, menu et commande sont là" || verdict faux "11b0. …rien n'est supprimé" "$(find "$I" 2>/dev/null)"
+  ! grep -q 'delete-generic-password' "$JOURNAL_SECURITY" && verdict vrai "11b0. …aucune suppression du Trousseau demandée" || verdict faux "11b0. …aucune suppression du Trousseau demandée" "$(cat "$JOURNAL_SECURITY")"
+  [ ! -s "$JOURNAL_NOYAU" ] && verdict vrai "11b0. …le noyau n'a reçu aucun ordre" || verdict faux "11b0. …le noyau n'a reçu aucun ordre" "$(cat "$JOURNAL_NOYAU")"
+  # Toute réponse ≠ 0 de show-keychain-info est un refus (pas seulement 36).
+  printf '1\n' > "$BASE/security-rc-show-keychain-info"
+  I2="$BASE/trousseau-info-autre"; faire_install "$I2"
+  lancer "$I2"
+  [ "$LAST_RC" -eq 15 ] && [ -f "$I2/config/p1/.credentials.json" ] && verdict vrai "11b0. …show-keychain-info répond 1 : code 15 aussi, rien n'est supprimé" || verdict faux "11b0. show-keychain-info 1 : code 15, rien supprimé" "$LAST_RC $LAST_OUT"
+  # Sans aucun profil, il n'y a rien au Trousseau à protéger : le contrôle ne bloque pas le départ d'un poste sans session.
+  I3="$BASE/trousseau-info-sans-profil"; faire_install "$I3"; rm -f "$I3/config/p1/.credentials.json"; rmdir "$I3/config/p1"
+  lancer "$I3"
+  [ "$LAST_RC" -eq 0 ] && [ ! -e "$I3" ] && verdict vrai "11b0. …sans aucun profil, show-keychain-info n'est pas exigé : code 0, installation supprimée" || verdict faux "11b0. sans profil : code 0" "$LAST_RC $LAST_OUT"
+  # Relance après DÉVERROUILLAGE (le faux répond 0 à show-keychain-info) : l'effacement va au bout.
+  rm -f "$BASE/security-rc-show-keychain-info"
+  : > "$JOURNAL_SECURITY"
+  lancer "$I"
+  [ "$LAST_RC" -eq 0 ] && [ ! -e "$I" ] && [ ! -e "$H/.local/bin/baluchon" ] && grep -q 'delete-generic-password' "$JOURNAL_SECURITY" \
+    && verdict vrai "11b0. …Trousseau déverrouillé, on relance : code 0, installation et commande supprimées, item demandé" || verdict faux "11b0. …relance après déverrouillage" "$LAST_RC $LAST_OUT"
+  # 11b-2. (Phase 1d) La lecture ET show-keychain-info répondent, puis la SUPPRESSION est refusée (Trousseau verrouillé entre
+  # les deux, ou refus d'accès) : avant, le script continuait, supprimait le dossier (donc les profils, donc le nom des
+  # items) et la purge ne pouvait plus se rejouer. Maintenant : code 15, l'installation est CONSERVÉE, le bilan le dit.
+  # 36 (verrouillé) et 51 (autre refus) sont deux refus distincts du même type.
+  for refus in 36 51; do
+    printf '0\n' > "$BASE/security-rc-find-generic-password"; printf '%s\n' "$refus" > "$BASE/security-rc-delete-generic-password"
+    I="$BASE/trousseau-delete-refuse-$refus"; faire_install "$I"
+    printf '#!/usr/bin/env bash\nexec "%s/Claude.command" "$@"\n' "$I" > "$H/.local/bin/baluchon"; chmod +x "$H/.local/bin/baluchon"
+    : > "$JOURNAL_SECURITY"; : > "$JOURNAL_NOYAU"
+    lancer "$I"
+    [ "$LAST_RC" -eq 15 ] && verdict vrai "11b2. lecture 0 puis suppression refusée ($refus) : code 15 (installation conservée), jamais 11 ni 0" || verdict faux "11b2. suppression refusée ($refus) : code 15" "$LAST_RC $LAST_OUT"
+    [ -f "$I/config/p1/.credentials.json" ] && [ -d "$I/config/p1" ] && [ -f "$I/.baluchon-install" ] && [ -x "$I/bin/plat/baluchon-core" ] && [ -f "$I/Claude.command" ] \
+      && verdict vrai "11b2. …($refus) le dossier d'installation est CONSERVÉ : profil, marqueur, noyau, menu" || verdict faux "11b2. …($refus) installation conservée" "$(find "$I" 2>/dev/null)"
+    [ -e "$H/.local/bin/baluchon" ] && verdict vrai "11b2. …($refus) la commande « baluchon » est conservée (elle mène à l'installation conservée)" || verdict faux "11b2. …($refus) la commande est conservée"
+    case "$LAST_OUT" in *"Rien de l'installation n'est supprimé"*"des sessions restent au Trousseau"*"Déverrouille le Trousseau"*) verdict vrai "11b2. …($refus) le bilan dit : rien de l'installation n'est supprimé, des sessions restent au Trousseau, déverrouille puis relance" ;; *) verdict faux "11b2. …($refus) le bilan le dit" "$LAST_OUT" ;; esac
+    case "$LAST_OUT" in *"ni son absence établie"*) verdict vrai "11b2. …($refus) le bilan nomme l'item dont l'absence n'est pas établie" ;; *) verdict faux "11b2. …($refus) le bilan nomme l'item" "$LAST_OUT" ;; esac
+    case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "11b2. …($refus) jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "11b2. …($refus) jamais « Plus aucune trace »" ;; esac
+    grep -q 'delete-generic-password' "$JOURNAL_SECURITY" && grep -q 'forget-access' "$JOURNAL_NOYAU" \
+      && verdict vrai "11b2. …($refus) ce qui était déjà fait reste fait : la suppression a été tentée, les jetons Access ont été oubliés" || verdict faux "11b2. …($refus) le reste du ménage a été joué" "$(cat "$JOURNAL_SECURITY" "$JOURNAL_NOYAU")"
+    # Relance après « déverrouillage » (le faux répond 0 à tout) : l'effacement va au bout, comme il n'aurait jamais dû cesser de pouvoir.
+    rm -f "$BASE/security-rc-find-generic-password" "$BASE/security-rc-delete-generic-password"
+    : > "$JOURNAL_SECURITY"
+    lancer "$I"
+    [ "$LAST_RC" -eq 0 ] && [ ! -e "$I" ] && [ ! -e "$H/.local/bin/baluchon" ] && grep -q 'delete-generic-password' "$JOURNAL_SECURITY" \
+      && verdict vrai "11b2. …($refus) Trousseau déverrouillé, relance : code 0, installation et commande supprimées, item demandé" || verdict faux "11b2. …($refus) relance après déverrouillage : code 0" "$LAST_RC $LAST_OUT"
+    case "$LAST_OUT" in *"Plus aucune trace"*) verdict vrai "11b2. …($refus) la relance aboutie dit « Plus aucune trace »" ;; *) verdict faux "11b2. …($refus) la relance dit « Plus aucune trace »" "$LAST_OUT" ;; esac
+  done
+  printf '44\n' > "$BASE/security-rc"; printf '0\n' > "$BASE/security-rc-show-keychain-info"
   I="$BASE/trousseau-absent"; faire_install "$I"
   lancer "$I"
   [ "$LAST_RC" -eq 0 ] && verdict vrai "Trousseau qui répond 44 (item absent) : c'est un succès (code 0)" || verdict faux "Trousseau 44 : code 0" "$LAST_RC $LAST_OUT"
-  rm -f "$BASE/security-rc"
+  rm -f "$BASE/security-rc" "$BASE/security-rc-show-keychain-info"
 fi
 # 11c. Cache d'exécution : retiré avec ses bornes, jamais plus loin que sa base, jamais à travers un lien.
 I="$BASE/cache-ok"; faire_install "$I"

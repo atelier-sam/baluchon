@@ -8,7 +8,7 @@
 | `lib/common.sh` | Plateforme, téléchargements vérifiés (fail-closed), mises à jour, choix du noyau, purge de repli. « Tout effacer » (`cc_wipe`) rend 0, 2 (session encore ouverte), 10 (jetons Cloudflare Access restés utilisables, y compris ceux des hôtes notés dans `.baluchon-acces` : `config/remote.conf` et `.baluchon-acces` sont alors gardés pour qu'une nouvelle tentative sache quel hôte oublier) ou 1, avec `CC_WIPE_NOTE` qui nomme ce qui reste ; le menu ne dit « ✓ Effacé » que sur 0. Épreuves : `scripts/effacement.test.sh <dossier-vide-absolu>`. |
 | `core/` → `baluchon-core` | Noyau Rust : comptes, statut, forfait, quotas, lancement verrouillé, outils Windows, accès distant. Contrat CLI versionné (`baluchon-core --contract`). |
 | `claude.cmd` / `claude-classic.cmd` | Lanceurs Windows (wizard / repli 100 % batch). |
-| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs et `uninstall.sh` sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install` ; voir « Un seul lien chez le client ») ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique), et tout dossier dont un ANCÊTRE peut être modifié par un autre utilisateur (écriture de groupe ou du monde sans bit sticky, propriétaire étranger). L'effacement part du dossier PARENT figé (identité périphérique:inode revérifiée, nom relatif) : un maillon échangé contre un lien après le jugement donne un refus. Un ménage incomplet (jetons Access, sessions du Trousseau, dossier non supprimé en entier) sort en code 10, 11 ou 12 avec un bilan qui nomme ce qui reste, jamais « Plus aucune trace » ; un Trousseau verrouillé ou inaccessible est vu AVANT toute suppression (code 15, rien n'est effacé). Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
+| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs et `uninstall.sh` sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install` ; voir « Un seul lien chez le client ») ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique), et tout dossier dont un ANCÊTRE peut être modifié par un autre utilisateur (écriture de groupe ou du monde sans bit sticky, propriétaire étranger). L'effacement part du dossier PARENT figé (identité périphérique:inode revérifiée, nom relatif) : un maillon échangé contre un lien après le jugement donne un refus. Un ménage incomplet (jetons Access, sessions du Trousseau, dossier non supprimé en entier) sort en code 10, 11 ou 12 avec un bilan qui nomme ce qui reste, jamais « Plus aucune trace » ; un Trousseau verrouillé ou inaccessible est vu AVANT toute suppression (`security show-keychain-info` ≠ 0, ou lecture d'un item refusée : code 15, rien n'est effacé) et un item qui refuse d'être supprimé arrête le script AVANT le dossier, le lien et les commandes (code 15 aussi : l'installation est conservée, la relance après déverrouillage va au bout). Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
 | `scripts/build-core.sh` | Compile `baluchon-core` pour darwin-arm64/x64, linux-x64/arm64 (musl statique), win32-x64 (zig + cargo-zigbuild). |
 | `scripts/release.sh` | Assemble la release à plat, `SHA256SUMS` signé, contre-vérifié avec la clé embarquée. |
 | `overlay/` | Optionnel. Une couche posée à côté du portable (voir « Couches »). Le portable n'y écrit jamais. |
@@ -300,9 +300,11 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
   (`cd /`), joue la copie du désinstalleur (une seule source des gardes de chemin), puis **relit le
   disque** : le menu n'écrit « Rien ne reste sur cet ordinateur » que si dossier, commandes, items du
   Trousseau, jetons Access et cache d'exécution sont réellement partis, sinon il liste le reste.
-  Codes : 0 rien ne reste, 14 rien fait (désinstalleur non authentique), 15 rien fait (Trousseau
-  verrouillé ou inaccessible, pré-contrôlé avant tout effacement ; le menu revient intact, relancer
-  après déverrouillage), 2 / 10 / 11 / 12 ceux d'`uninstall.sh` ou de `cc_wipe`, 13 un
+  Codes : 0 rien ne reste, 14 rien fait (désinstalleur non authentique), 15 le Trousseau refuse
+  (verrouillé, accès refusé) : **l'installation est CONSERVÉE** (dossier, profils, commandes, menu), le
+  menu le dit et revient, « Partir » se relance après déverrouillage (au pré-contrôle : rien n'a été
+  effacé ; à la suppression d'un item : les fichiers de connexion sont effacés mais les dossiers de
+  profil restent), 2 / 10 / 11 / 12 ceux d'`uninstall.sh` ou de `cc_wipe`, 13 un
   reste que personne n'avait signalé. Aucun journal n'est écrit après l'effacement (il recréerait le
   dossier). Sur un poste invité, « Partir » est en tête du menu.
   - **Niveau de confiance, dit en clair** : « Partir » fait confiance à ce que fait confiance le menu
@@ -340,19 +342,33 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
     Windows (jonctions) n'est pas couvert.
   - **Trousseau** : `security` répond 0 (supprimé) ou 44 (l'item n'existait pas) ⇒ « plus rien » ; toute
     autre réponse (Trousseau verrouillé, accès refusé, outil absent) n'établit RIEN : « sessions non
-    vérifiées », code non nul, jamais « Rien ne reste ». **Pré-contrôle avant toute suppression** : un
-    Trousseau verrouillé ne doit pas laisser un effacement À MOITIÉ fait (profils, jetons et commandes
-    partis, sessions encore au Trousseau). Sur macOS, `cc_depart` (après le relevé), `cc_wipe` et
-    `uninstall.sh` (étape « 0) », avant tout crochet ou noyau) LISENT d'abord chaque item
-    (`find-generic-password`, un par profil de `config/*/` et par chemin physique) : une réponse 0 ou
-    44 laisse passer, toute autre arrête TOUT avant d'effacer quoi que ce soit : « Partir » et
-    `uninstall.sh` sortent en **code 15**, `cc_wipe` et `cc_purge_sessions` en **code 3**, avec la
-    consigne « déverrouille le Trousseau puis relance » ; rien n'est supprimé, la relance après
-    déverrouillage termine normalement. Limite dite : ce pré-contrôle est une LECTURE ; elle prouve que
-    le Trousseau est joignable, pas qu'une suppression réussira. Un verrouillage entre le pré-contrôle
-    et la suppression est vu par la suppression elle-même (code 3 de la purge, qui remonte en code 1
-    de `cc_wipe` et 11 d'`uninstall.sh`, avec « des sessions restent au Trousseau »), jamais en
-    « Rien ne reste ».
+    vérifiées », code non nul, jamais « Rien ne reste ». Le nom d'un item se calcule depuis le dossier de
+    son profil : un dossier supprimé pendant que le Trousseau refuse laisse des sessions dont plus rien ne
+    dit le nom, et l'effacement ne se rejoue plus. D'où deux garanties :
+    1. **Pré-contrôle, avant toute suppression** : sur macOS, `cc_depart` (après le relevé), `cc_wipe` et
+       `uninstall.sh` (étape « 0) », avant tout crochet ou noyau) exigent d'abord que le Trousseau soit
+       **déverrouillé** (`security show-keychain-info` : 0 = déverrouillé, 36 = verrouillé, toute réponse
+       ≠ 0 est un refus ; c'est le test que Claude Code applique lui-même), puis LISENT chaque item
+       (`find-generic-password`, un par profil de `config/*/` et par chemin physique : 0 ou 44 laisse
+       passer, toute autre réponse arrête). La lecture seule ne suffisait pas : une recherche d'attributs
+       peut répondre 0 ou 44 sur un Trousseau VERROUILLÉ, seule la suppression exige le déverrouillage.
+       Un refus sort en **code 15** (« Partir », `uninstall.sh`) ou **3** (`cc_wipe`, `cc_purge_sessions`),
+       rien n'est supprimé, et la relance après déverrouillage termine normalement. Sans aucun profil, rien
+       n'est à protéger au Trousseau : le contrôle n'est pas joué.
+    2. **Un refus à la suppression conserve l'installation** : si un item refuse d'être supprimé après ce
+       pré-contrôle réussi (verrouillé entre-temps, accès refusé : toute réponse autre que 0 ou 44),
+       `uninstall.sh` s'arrête AVANT de toucher au dossier d'installation, au lien qui y mène et aux
+       commandes (code **15**, bilan « Rien de l'installation n'est supprimé, des sessions restent au
+       Trousseau »), et `cc_wipe` laisse les dossiers de profil et `ACTIVE` en place (code **3**, qui prime
+       sur 1 et 10) ; `cc_depart` rend alors 15 sans lancer le désinstalleur (ou après qu'il a rendu 15) et
+       le menu dit que l'installation est conservée et qu'il faut relancer « Partir » après déverrouillage.
+       Ce qui était déjà fait (crochet de la couche, noyau, fichiers de connexion purgés, jetons Access,
+       cache d'exécution) reste fait ; la relance refait la suite et va au bout.
+    Limites dites : (a) l'état « déverrouillé » est LU à un instant, un verrouillage ensuite n'est pas
+    empêché, il est VU par la suppression (garantie 2) ; (b) ces comportements sont éprouvés avec un FAUX
+    `security` seulement (jamais le vrai Trousseau) : ce que fait réellement `show-keychain-info` sur un
+    Trousseau verrouillé (36) est tenu pour acquis, non vérifié par un essai ; (c) la relance rejoue le
+    crochet de la couche s'il y en a un : il doit être rejouable.
   - **Cache d'exécution** : sur une clé montée sans exécution, `${XDG_CACHE_HOME:-~/.cache}/baluchon`
     reçoit des copies des binaires ; `.baluchon-cache` en note les dossiers ET, une fois, la BASE qui
     les porte (ligne `base <cache>/baluchon`) : un `XDG_CACHE_HOME` différent au moment de partir ne
@@ -380,10 +396,12 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
   verrouillé, noyau menteur, annulation, désinstalleur illisible ou remplacé pendant le menu, manifeste
   forgé, `config` lien, cache, lien symbolique, hôte noté, contrôles positifs),
   `scripts/uninstall.test.sh` (refus de chemins, noyau et crochet jamais lancés sans empreinte
-  authentifiée, `config` lien, Trousseau verrouillé AVANT toute suppression (code 15, rien supprimé,
-  relance après déverrouillage) ou PENDANT (code 11), cache) et `scripts/effacement.test.sh` (`cc_wipe`
-  et `cc_purge_sessions` : racines douteuses, `config` ou profil lien, Trousseau verrouillé : code 3
-  sans rien toucher, ou refus de la suppression après une lecture réussie : code 1). Chaque épreuve nouvelle est
+  authentifiée, `config` lien, Trousseau verrouillé AVANT toute suppression (`show-keychain-info` ≠ 0 ou
+  lecture refusée : code 15, rien supprimé, relance après déverrouillage) ou refus de la SUPPRESSION
+  après des contrôles réussis (36, 51 : code 15, installation et commandes conservées, relance après
+  déverrouillage), cache) et `scripts/effacement.test.sh` (`cc_wipe` et `cc_purge_sessions` : racines
+  douteuses, `config` ou profil lien, Trousseau verrouillé : code 3 sans rien toucher, ou refus de la
+  suppression après des contrôles réussis : code 3, profils conservés, relance qui aboutit). Chaque épreuve nouvelle est
   rejouée contre l'ancien code (lu dans l'historique git) et doit y échouer. Les essais posent une clé
   de signature JETABLE à la place de celle du produit.
 - **Limite connue** : Windows (`install.ps1`, menu) n'a pas encore cette chaîne.

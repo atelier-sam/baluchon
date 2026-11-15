@@ -23,9 +23,17 @@
 #  Codes de sortie : 0 = tout est effacé ; 1 = rien à désinstaller ou annulé ; 2 = refusé (rien n'est
 #  supprimé) ; 10 = des jetons Cloudflare Access restent utilisables ; 11 = la purge des sessions
 #  est incomplète (dont : Trousseau illisible, config en lien) ; 12 = le dossier ou un cache d'exécution
-#  n'a pas pu être supprimé en entier ; 15 = le Trousseau (macOS) ne répond pas : RIEN n'est supprimé,
-#  déverrouille-le puis relance (contrôlé avant toute suppression). Un code 10, 11 ou 12 dit ce qui reste,
-#  sur la sortie d'erreur : jamais « Plus aucune trace » dans ce cas.
+#  n'a pas pu être supprimé en entier ; 15 = le Trousseau (macOS) refuse : L'INSTALLATION EST CONSERVÉE
+#  (dossier, profils, commandes), déverrouille-le puis relance. Deux moments, même code :
+#    - avant toute suppression : `security show-keychain-info` (0 = déverrouillé, 36 = verrouillé) puis la lecture
+#      de chaque item (0 présent, 44 absent) ; une autre réponse est un refus, rien n'est supprimé ;
+#    - à la suppression d'un item (verrouillé entre le contrôle et le geste) : le dossier d'installation, le lien
+#      qui y mène et les commandes ne sont PAS supprimés, parce que le nom d'un item du Trousseau se calcule depuis
+#      le dossier de son profil : sans lui, les sessions restantes ne se retrouveraient plus et l'effacement ne se
+#      rejouerait plus. Ce qui était déjà fait (crochet de la couche, noyau, fichiers de connexion purgés, jetons
+#      Cloudflare Access, cache d'exécution) reste fait ; le bilan le dit. La relance, Trousseau déverrouillé, va
+#      au bout.
+#  Un code 10, 11, 12 ou 15 dit ce qui reste, sur la sortie d'erreur : jamais « Plus aucune trace » dans ce cas.
 # ============================================================
 set -uo pipefail
 DIR_DEMANDE="${BALUCHON_DIR:-$HOME/.baluchon}"
@@ -223,6 +231,9 @@ LDIR="$(couche_dir || true)"
 # non supprimable restait utilisable et le script annonçait « Plus aucune trace »).
 CODE_SORTIE=0
 BILAN=""
+# 1 dès qu'un item du Trousseau refuse d'être supprimé (ni « supprimé » ni « absent ») : le dossier d'installation, le
+# lien qui y mène et les commandes sont alors CONSERVÉS (code 15) pour que l'effacement puisse être rejoué.
+TROUSSEAU_REFUSE=0
 incomplet() { # incomplet <code> <texte>
   [ "$CODE_SORTIE" != 0 ] || CODE_SORTIE="$1"
   BILAN="${BILAN}${BILAN:+$'\n'}$2"
@@ -233,9 +244,25 @@ indente() { printf '%s\n' "$1" | sed 's/^/      /' | head -n 20; }
 # `rm -rf` viennent après). Le nom d'un item du Trousseau se calcule depuis le dossier de son profil : un dossier
 # supprimé pendant que le Trousseau refuse (verrouillé, accès refusé) laisse des sessions dont plus rien ne dit le
 # nom, et l'effacement ne peut plus être rejoué. Rien n'est donc touché : code 15, déverrouille puis relance.
-# 0 (présent) et 44 (absent) disent « le Trousseau répond » ; toute autre réponse, y compris « security » absent.
+# Deux contrôles. (1) `security show-keychain-info` (Trousseau par défaut) : 0 = déverrouillé, 36 = verrouillé, toute
+# réponse ≠ 0 est un refus. WHY : une recherche d'attributs (find-generic-password sans -w) peut répondre 0 ou 44 sur
+# un Trousseau VERROUILLÉ, seule la suppression exige le déverrouillage ; c'est le test que Claude Code applique
+# lui-même. (2) Pour chaque profil, 0 (présent) et 44 (absent) disent « le Trousseau répond » ; toute autre réponse,
+# y compris « security » absent. Un Trousseau qui se verrouille APRÈS ces contrôles est vu par la suppression (étape 2),
+# qui laisse alors l'installation en place (code 15, voir plus bas).
 if [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ] && [ ! -L "$DIR/config" ]; then
   verifie_ou_refuse
+  AU_MOINS_UN_PROFIL=0
+  for d in "$DIR"/config/*/; do
+    [ -d "$d" ] && AU_MOINS_UN_PROFIL=1 && break
+  done
+  if [ "$AU_MOINS_UN_PROFIL" = 1 ]; then
+    ir=0; security show-keychain-info >/dev/null 2>&1 || ir=$?
+    if [ "$ir" != 0 ]; then
+      printf '✗ Trousseau verrouillé ou inaccessible (« security show-keychain-info » répond %s) : déverrouille-le puis relance. Rien n'"'"'est supprimé.\n' "$ir" >&2
+      exit 15
+    fi
+  fi
   for d in "$DIR"/config/*/; do
     [ -d "$d" ] || continue
     svc="Claude Code-credentials-$(printf '%s' "${d%/}" | shasum -a 256 | cut -c1-8)"
@@ -302,7 +329,8 @@ elif [ "$(uname -s)" = "Darwin" ] && [ -d "$DIR/config" ]; then
     case "$sr" in
       0)  echo "  - Trousseau : $svc supprimé" ;;
       44) ;;
-      *)  incomplet 11 "Trousseau : « $svc » n'a pas pu être effacé, ni son absence établie (code $sr ; Trousseau verrouillé ?)." ;;
+      *)  TROUSSEAU_REFUSE=1
+          incomplet 11 "Trousseau : « $svc » n'a pas pu être effacé, ni son absence établie (code $sr ; Trousseau verrouillé ?)." ;;
     esac
   done
 fi
@@ -444,6 +472,20 @@ if [ -f "$DIR/.baluchon-cache" ] && [ ! -L "$DIR/.baluchon-cache" ]; then
       *) incomplet 12 "Cache d'exécution non supprimé en entier : $c" ;;
     esac
   done < "$DIR/.baluchon-cache"
+fi
+
+# Un item du Trousseau a refusé d'être supprimé : on s'ARRÊTE ICI, avant tout geste sur le dossier d'installation.
+# Les dossiers de profil sont la seule chose dont on recalcule le nom des items restants : les supprimer rendrait
+# l'effacement impossible à rejouer (re-revue Codex, constat 7). Rien du dossier, du lien qui y mène ni des commandes
+# n'est supprimé ; ce qui était déjà fait (crochet, noyau, fichiers de connexion, jetons Access, cache) reste fait et
+# est dit. Code 15 : l'appelant (menu « Partir ») dit que l'installation est conservée et qu'on relance après
+# déverrouillage.
+if [ "$TROUSSEAU_REFUSE" = 1 ]; then
+  echo "⚠ Désinstallation INTERROMPUE : le Trousseau a refusé la suppression de sessions (verrouillé ?)." >&2
+  echo "  Rien de l'installation n'est supprimé (dossier, profils, commandes) : des sessions restent au Trousseau." >&2
+  echo "  Déverrouille le Trousseau puis relance : l'effacement ira au bout." >&2
+  printf '%s\n' "$BILAN" | sed 's/^/  /' >&2
+  exit 15
 fi
 
 # On efface le dossier PHYSIQUE jugé plus haut, sans repasser par son chemin : on entre dans le dossier

@@ -20,7 +20,12 @@
 #      domicile, ou un chemin relatif, est refusée avant toute suppression.
 #    - (revue Codex, 4e passe, constat 7) Trousseau macOS (faux `security`, CC_OS=darwin dans le seul bash
 #      d'essai) : verrouillé AVANT l'effacement = code 3 et RIEN n'est touché, la relance après
-#      déverrouillage va au bout ; refusé À la suppression = code 1 et la note nomme le Trousseau.
+#      déverrouillage va au bout ;
+#    - (phase 1d) le Trousseau doit être DÉVERROUILLÉ : `security show-keychain-info` ≠ 0 (36) refuse comme un
+#      Trousseau illisible, même si la lecture d'attributs répond ; refusé À la suppression = code 3 (et non plus 1),
+#      les fichiers de connexion sont effacés mais les DOSSIERS de profil et ACTIVE sont conservés (de quoi rejouer),
+#      la note nomme le Trousseau, la relance après déverrouillage va au bout ; il prime sur l'échec des jetons Access.
+#      Faux `security` seulement : jamais le vrai Trousseau.
 #  Contrôle positif : passer l'ANCIEN lib/common.sh en 2e argument doit faire échouer les
 #  épreuves « jetons restants » (il rendait 0 et effaçait remote.conf) et les épreuves 6 à 8 (il suivait
 #  le lien et effaçait le témoin).
@@ -227,6 +232,7 @@ cat > "$SECD/security" <<'SEC'
 d="$(cd "$(dirname "$0")" && pwd)"
 printf '%s\n' "$1" >> "$d/APPELS_SECURITY"
 case "$1" in
+  show-keychain-info) exit "$(cat "$d/INFO_RC" 2>/dev/null || echo 0)" ;;
   find-generic-password) exit "$(cat "$d/FIND_RC" 2>/dev/null || echo 44)" ;;
   delete-generic-password) exit "$(cat "$d/DELETE_RC" 2>/dev/null || echo 44)" ;;
 esac
@@ -258,14 +264,51 @@ o="$(joue_mac "$R" "$HOSTILE")"
 egal "10a. …déverrouillé, la relance aboutit (code 0)" 0 "${o%%|*}"
 egal "10a. …et config/ est vidé" "" "$(ls -A "$R/config")"
 
-# 10b) Le pré-contrôle passe (lecture 44), puis la SUPPRESSION est refusée : les fichiers sont traités, le Trousseau est dit
-# (code 1, note « Trousseau »), jamais 0. Le noyau échoue (PURGE_RC=1) pour que le repli bash joue le Trousseau.
+# 10a2) (phase 1d) Le Trousseau est VERROUILLÉ mais la LECTURE répond encore (0) : seul `security show-keychain-info`
+# (36 = verrouillé) le dit. Même verdict que 10a : code 3, RIEN n'est touché. Faux `security` : jamais le vrai Trousseau,
+# et ce que fait le vrai show-keychain-info sous verrou est tenu pour acquis (36), non éprouvé.
+: > "$BASE/APPELS"; : > "$SECD/APPELS_SECURITY"; printf '36\n' > "$SECD/INFO_RC"; printf '0\n' > "$SECD/FIND_RC"; printf '0\n' > "$SECD/DELETE_RC"
+R="$(racine trousseau-info-verrouille)"; AVANT="$(contenu "$R")"
+o="$(joue_mac "$R" "$HOSTILE")"
+egal "10a2. lecture 0 mais show-keychain-info 36 : code 3" 3 "${o%%|*}"
+case "${o#*|}" in *"Trousseau verrouillé"*"show-keychain-info"*"Rien n'a été effacé"*) verdict vrai "10a2. …la note dit « Trousseau verrouillé », nomme show-keychain-info et dit que rien n'a été effacé" ;; *) verdict faux "10a2. …la note le dit" "${o#*|}" ;; esac
+egal "10a2. …RIEN n'est modifié (profils, remote.conf, ACTIVE)" "$AVANT" "$(contenu "$R")"
+egal "10a2. …le noyau n'a reçu aucun ordre" 0 "$(wc -l < "$BASE/APPELS" | tr -d ' ')"
+verdict "$(grep -q delete-generic-password "$SECD/APPELS_SECURITY" && echo faux || echo vrai)" "10a2. …aucune suppression du Trousseau n'a été demandée"
+printf '1\n' > "$SECD/INFO_RC"
+o="$(joue_mac "$R" "$HOSTILE")"
+egal "10a2. …show-keychain-info répond 1 : refus aussi (code 3), toute réponse ≠ 0 est un refus" 3 "${o%%|*}"
+egal "10a2. …et toujours rien de modifié" "$AVANT" "$(contenu "$R")"
+rm -f "$SECD/INFO_RC"
+o="$(joue_mac "$R" "$HOSTILE")"
+egal "10a2. …déverrouillé (show-keychain-info 0), la relance aboutit (code 0)" 0 "${o%%|*}"
+rm -f "$SECD/FIND_RC" "$SECD/DELETE_RC"
+
+# 10b) (phase 1d) Le pré-contrôle passe (show-keychain-info 0, lecture 44), puis la SUPPRESSION est refusée : les fichiers de
+# connexion sont effacés mais les DOSSIERS de profil restent (le nom d'un service se calcule depuis eux : les supprimer
+# rendrait l'effacement impossible à rejouer), code 3 (jamais 0 ni 1), la note nomme le Trousseau. Le noyau échoue
+# (PURGE_RC=1) pour que le repli bash joue le Trousseau. Avant : code 1 et config/ vidé.
 printf '44\n' > "$SECD/FIND_RC"; printf '36\n' > "$SECD/DELETE_RC"; printf '1\n' > "$BASE/PURGE_RC"; printf '0\n' > "$BASE/FORGET_RC"
 R="$(racine trousseau-delete-refuse)"
 o="$(joue_mac "$R" "$FAUX")"
-egal "10b. lecture 44 puis suppression refusée (36) : code 1, jamais 0" 1 "${o%%|*}"
-case "${o#*|}" in *"Trousseau"*) verdict vrai "10b. …la note nomme le Trousseau" ;; *) verdict faux "10b. …la note nomme le Trousseau" "${o#*|}" ;; esac
-verdict "$([ ! -e "$R/config/perso" ] && [ ! -e "$R/config/pro" ] && echo vrai || echo faux)" "10b. …les fichiers de connexion sont effacés quand même"
+egal "10b. lecture 44 puis suppression refusée (36) : code 3, jamais 0 ni 1" 3 "${o%%|*}"
+case "${o#*|}" in *"Trousseau"*"CONSERVÉS"*) verdict vrai "10b. …la note nomme le Trousseau et dit que les dossiers de profil sont CONSERVÉS" ;; *) verdict faux "10b. …la note nomme le Trousseau et les profils conservés" "${o#*|}" ;; esac
+verdict "$([ -d "$R/config/perso" ] && [ -d "$R/config/pro" ] && [ -f "$R/ACTIVE" ] && echo vrai || echo faux)" "10b. …les dossiers de profil et ACTIVE sont CONSERVÉS (de quoi rejouer)"
+verdict "$([ ! -e "$R/config/perso/.credentials.json" ] && [ ! -e "$R/config/pro/.credentials.json" ] && echo vrai || echo faux)" "10b. …les fichiers de connexion sont effacés quand même"
+# Déverrouillé : la relance retrouve les profils, calcule les mêmes noms et va au bout.
+printf '0\n' > "$SECD/FIND_RC"; printf '0\n' > "$SECD/DELETE_RC"
+o="$(joue_mac "$R" "$FAUX")"
+egal "10b. …Trousseau déverrouillé, la relance aboutit (code 0)" 0 "${o%%|*}"
+egal "10b. …et config/ est vidé, ACTIVE aussi" "" "$(ls -A "$R/config")$([ -e "$R/ACTIVE" ] && echo ACTIVE)"
+# Le refus du Trousseau prime sur l'échec des jetons Access : code 3 (l'installation reste, on rejoue), les DEUX restes sont dits,
+# remote.conf est gardé (c'est lui qui dit quel hôte oublier).
+printf '44\n' > "$SECD/FIND_RC"; printf '36\n' > "$SECD/DELETE_RC"; printf '10\n' > "$BASE/FORGET_RC"
+R="$(racine trousseau-et-access)"
+o="$(joue_mac "$R" "$FAUX")"
+egal "10b. …Trousseau refusé ET jetons Access non effacés : code 3 (le Trousseau prime)" 3 "${o%%|*}"
+case "${o#*|}" in *"Trousseau"*"UTILISABLES"*) verdict vrai "10b. …la note dit les deux restes (Trousseau, jetons Access)" ;; *) verdict faux "10b. …la note dit les deux restes" "${o#*|}" ;; esac
+verdict "$([ -d "$R/config/perso" ] && [ -f "$R/config/remote.conf" ] && echo vrai || echo faux)" "10b. …profils et remote.conf conservés"
+printf '0\n' > "$BASE/FORGET_RC"
 
 # 10c) Items absents (44 partout) : succès, code 0.
 printf '44\n' > "$SECD/FIND_RC"; printf '44\n' > "$SECD/DELETE_RC"; printf '1\n' > "$BASE/PURGE_RC"

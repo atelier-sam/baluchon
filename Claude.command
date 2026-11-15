@@ -359,7 +359,7 @@ do_wipe() {
     case "$wrc" in
       0) good "✓ Effacé (Trousseau compris). Révoque les jetons sur claude.ai si la clé a été perdue." ;;
       2) bad "Effacé, mais une session Claude restait ouverte : ferme-la, puis refais « Tout effacer »." ;;
-      3) bad "⚠ Trousseau verrouillé ou inaccessible : RIEN n'a été effacé. Déverrouille-le, puis refais « Tout effacer »."
+      3) bad "⚠ Trousseau verrouillé ou inaccessible : l'effacement n'est pas terminé (la note dit ce qui a été fait). Déverrouille-le, puis refais « Tout effacer »."
          printf '%s\n' "$CC_WIPE_NOTE" | sed 's/^/  /'
          read -r -p "  Entrée pour revenir au menu… " _ < /dev/tty 2>/dev/null || sleep 8 ;;
       *) bad "⚠ Effacement INCOMPLET : ce qui reste est utilisable."
@@ -427,10 +427,19 @@ do_partir() {
   note "Effacement en cours…"
   local code=0
   cc_depart || code=$?
-  if [ "$code" = 14 ] || [ "$code" = 15 ]; then
-    # Rien n'a été fait (14 : désinstalleur absent ou altéré ; 15 : Trousseau verrouillé ou inaccessible) : le menu
-    # est intact, on y revient. Le 15 se rejoue tel quel une fois le Trousseau déverrouillé.
+  if [ "$code" = 14 ]; then
+    # Rien n'a été fait (désinstalleur absent ou altéré) : le menu est intact, on y revient.
     bad "$CC_DEPART_NOTE"; sleep 4; return 0
+  fi
+  if [ "$code" = 15 ]; then
+    # Le Trousseau refuse (verrouillé, accès refusé) : l'INSTALLATION EST CONSERVÉE, dossier et menu compris (cc_depart
+    # ne lance pas, ou fait s'arrêter, le désinstalleur avant de supprimer quoi que ce soit du dossier) ; des fichiers de
+    # connexion ont pu être effacés, les profils restent. Le menu continue donc, et « Partir » se rejoue tel quel une
+    # fois le Trousseau déverrouillé. Pause lisible : la note dit quoi faire, un `sleep` court la ferait disparaître.
+    bad "$CC_DEPART_NOTE"
+    # `-t 0` : sans terminal en entrée (essais, tube), jamais d'attente sur /dev/tty ; un simple délai.
+    if [ -t 0 ]; then read -r -p "  Entrée pour revenir au menu… " _ < /dev/tty 2>/dev/null || sleep 8; else sleep 8; fi
+    return 0
   fi
   # Le dossier n'existe plus (ni gum, ni le noyau, ni la bibliothèque) : à partir d'ici, printf seul, et
   # aucun cc_log (il recréerait logs/ dans le dossier qu'on vient d'effacer).

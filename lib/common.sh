@@ -808,19 +808,31 @@ cc_services_trousseau() {
   done
 }
 
-# Le Trousseau répond-il, pour chacun de ces services (un par ligne) ? À jouer AVANT de supprimer quoi que ce
-# soit : le nom d'un service se calcule depuis le dossier du profil, donc un dossier supprimé pendant que le
-# Trousseau refuse (verrouillé, accès refusé, outil absent) laisse des sessions dont plus rien ne dit le nom,
-# et l'effacement ne peut plus être rejoué. 0 = chaque réponse est « présent » (0) ou « absent » (44) ; 1
-# sinon, avec CC_TROUSSEAU_NOTE (la cause, en une ligne). Hors macOS ou sans service : 0.
-# Honnêteté : c'est une LECTURE ; elle prouve que le Trousseau est joignable, pas qu'une suppression
-# réussira ensuite (un refus à ce moment-là est vu par la suppression elle-même, code 3 de cc_purge_sessions).
+# Le Trousseau est-il DÉVERROUILLÉ et répond-il, pour chacun de ces services (un par ligne) ? À jouer AVANT de
+# supprimer quoi que ce soit : le nom d'un service se calcule depuis le dossier du profil, donc un dossier
+# supprimé pendant que le Trousseau refuse (verrouillé, accès refusé, outil absent) laisse des sessions dont
+# plus rien ne dit le nom, et l'effacement ne peut plus être rejoué. Deux contrôles, dans cet ordre :
+#   1. `security show-keychain-info` (Trousseau par défaut) : 0 = déverrouillé, 36 = verrouillé (fréquent en
+#      SSH) ; toute réponse ≠ 0 est un refus. WHY : une recherche d'attributs (find-generic-password sans -w)
+#      peut répondre 0 ou 44 sur un Trousseau VERROUILLÉ ; seule la suppression exige le déverrouillage, donc la
+#      lecture seule ne prouvait pas ce qu'on croyait. C'est le test que Claude Code applique lui-même.
+#   2. `find-generic-password -s <service>` : 0 (présent) ou 44 (absent) pour chaque service ; autre = refus.
+# 0 = prêt ; 1 sinon, avec CC_TROUSSEAU_NOTE (la cause, en une ligne). Hors macOS ou sans service : 0.
+# Honnêteté : c'est un état LU à un instant ; un Trousseau qui se verrouille ENSUITE est vu par la suppression
+# elle-même (code 3 de cc_purge_sessions, 15 d'uninstall.sh), qui laisse alors les dossiers de profil en place
+# (voir cc_wipe et uninstall.sh) : l'effacement reste rejouable.
 cc_trousseau_pret() { # cc_trousseau_pret <services, un par ligne>
-  local s sr
+  local s sr ir=0
   CC_TROUSSEAU_NOTE=""
   [ "${CC_OS:-}" = darwin ] || return 0
   [ -n "${1:-}" ] || return 0
   if ! command -v security >/dev/null 2>&1; then CC_TROUSSEAU_NOTE="outil « security » absent"; return 1; fi
+  security show-keychain-info >/dev/null 2>&1 || ir=$?
+  if [ "$ir" != 0 ]; then
+    CC_TROUSSEAU_NOTE="« security show-keychain-info » répond $ir"
+    [ "$ir" != 36 ] || CC_TROUSSEAU_NOTE="$CC_TROUSSEAU_NOTE : Trousseau verrouillé"
+    return 1
+  fi
   while IFS= read -r s; do
     [ -n "$s" ] || continue
     sr=0; security find-generic-password -s "$s" >/dev/null 2>&1 || sr=$?
@@ -885,9 +897,14 @@ cc_purge_keychain() { cc_purge_sessions; }
 # Code retour (ce qui RESTE est dit dans CC_WIPE_NOTE, jamais avalé) :
 #   0 = tout effacé ; 2 = effacé, mais une session Claude encore ouverte peut réécrire ses
 #   identifiants ; 10 = des jetons Cloudflare Access restent UTILISABLES ; 1 = sessions mal effacées ;
-#   3 = le Trousseau ne répond pas (verrouillé, accès refusé) : RIEN n'a été effacé, déverrouille-le
-#   puis refais (pré-contrôle ci-dessous : un dossier de profil supprimé pendant que le Trousseau refuse
-#   ne laisse plus de quoi rejouer l'effacement).
+#   3 = le Trousseau refuse (verrouillé, accès refusé), déverrouille-le puis refais. Deux moments :
+#     - au pré-contrôle (cc_trousseau_pret : show-keychain-info + lecture de chaque service) : RIEN n'a été
+#       effacé ;
+#     - à la suppression d'un item (verrouillé entre-temps) : les fichiers de connexion sont effacés, mais les
+#       DOSSIERS de profil RESTENT (ACTIVE aussi) : le nom d'un service se calcule depuis eux, donc les
+#       supprimer ferait perdre de quoi rejouer l'effacement. Refaire après déverrouillage va au bout.
+#     Ce code prime sur 1 et 10 (la note dit tout) : l'appelant (cc_depart) s'arrête alors AVANT de supprimer
+#     l'installation.
 # WHY : avant, les deux échecs étaient ignorés et le menu affichait « ✓ Effacé » ; sur un poste
 # prêté, un jeton Access resté en place rouvrait la liaison avec le Mac (même défaut que celui
 # que la revue Codex avait trouvé dans uninstall.sh).
@@ -895,7 +912,7 @@ cc_purge_keychain() { cc_purge_sessions; }
 # hôte oublier ; sans lui, une nouvelle tentative répondrait « aucun Mac configuré » et réussirait
 # sans rien effacer. Il ne contient aucun secret (hôte, utilisateur, options).
 cc_wipe() {
-  local prc=0 frc=0 sortie="" f h autres cfg liens="" lrc=0 lien_cfg=0
+  local prc=0 frc=0 sortie="" f h autres cfg liens="" lrc=0 lien_cfg=0 tr_refuse=0
   CC_WIPE_NOTE=""
   # Avant toute suppression : la racine est jugée (cc_racine_sure), et `config` n'est jamais suivi s'il est un lien.
   if ! cc_racine_sure; then
@@ -911,9 +928,10 @@ cc_wipe() {
   fi
   cc_purge_keychain || prc=$?
   if [ "$prc" = 3 ]; then
-    # Le pré-contrôle a passé, puis le Trousseau a refusé une suppression (verrouillé entre-temps).
-    prc=1
-    CC_WIPE_NOTE="Des sessions restent au Trousseau (il a refusé la suppression : verrouillé ?). Les fichiers de connexion, eux, sont effacés : ouvre « Trousseau d'accès » et supprime à la main les items « Claude Code-credentials-… » de ce portable."
+    # Le pré-contrôle a passé, puis le Trousseau a refusé une suppression (verrouillé entre-temps). Les dossiers
+    # de profil RESTENT (voir plus bas) : c'est d'eux que se recalcule le nom des services, donc de quoi rejouer.
+    prc=1; tr_refuse=1
+    CC_WIPE_NOTE="Des sessions restent au Trousseau (il a refusé la suppression : verrouillé ?). Les fichiers de connexion, eux, sont effacés ; les dossiers de profil sont CONSERVÉS : déverrouille le Trousseau puis refais l'effacement, il ira au bout."
   fi
   # Hôtes d'accès que l'amorce a signalés parce que leurs jetons pouvaient rester (.baluchon-acces) :
   # ils ne sont pas dans remote.conf, donc le `forget-access` nu ne les verrait jamais.
@@ -941,22 +959,27 @@ cc_wipe() {
                 [ -e "$f" ] || [ -L "$f" ] || continue
                 if [ "$frc" != 0 ] && [ "${f#./}" = remote.conf ]; then continue; fi
                 if [ -L "$f" ]; then printf '%s\n' "${f#./}"; continue; fi
+                # Trousseau refusé : un dossier de profil est gardé, il porte le nom du service restant.
+                if [ "$tr_refuse" = 1 ] && [ -d "$f" ]; then continue; fi
                 rm -rf -- "$f" 2>/dev/null || true
               done )" || lrc=$?
     if [ "$lrc" = 3 ]; then
-      prc=1; CC_WIPE_NOTE="config n'est plus le dossier jugé (remplacé pendant l'effacement) : rien n'y a été effacé."
+      prc=1; CC_WIPE_NOTE="${CC_WIPE_NOTE}${CC_WIPE_NOTE:+$'\n'}config n'est plus le dossier jugé (remplacé pendant l'effacement) : rien n'y a été effacé."
     elif [ -n "$liens" ]; then
-      prc=1; CC_WIPE_NOTE="Ces entrées de config sont des liens symboliques : jamais suivis, leur contenu n'a PAS été effacé :"$'\n'"$(printf '%s\n' "$liens" | sed 's/^/  - config\//' | head -n 12)"
+      prc=1; CC_WIPE_NOTE="${CC_WIPE_NOTE}${CC_WIPE_NOTE:+$'\n'}Ces entrées de config sont des liens symboliques : jamais suivis, leur contenu n'a PAS été effacé :"$'\n'"$(printf '%s\n' "$liens" | sed 's/^/  - config\//' | head -n 12)"
     fi
   fi
-  rm -f "$CC_ROOT_REAL"/ACTIVE 2>/dev/null || true
+  # ACTIVE dit quel profil est actif : tant que les profils restent (Trousseau refusé), il reste avec eux.
+  [ "$tr_refuse" = 1 ] || rm -f "$CC_ROOT_REAL"/ACTIVE 2>/dev/null || true
   if [ "$prc" != 0 ] && [ "$prc" != 2 ] && [ -z "$CC_WIPE_NOTE" ]; then
     CC_WIPE_NOTE="Des identifiants Claude n'ont pas pu être effacés (Trousseau ou fichiers de $ROOT/config)."
   fi
   if [ "$frc" != 0 ]; then
     CC_WIPE_NOTE="${CC_WIPE_NOTE}${CC_WIPE_NOTE:+$'\n'}Des jetons Cloudflare Access restent UTILISABLES sur cet ordinateur (code $frc) :"$'\n'"$(printf '%s\n' "$sortie" | head -n 12)"$'\n'"Supprime-les à la main : fichiers dont le nom finit par « -token » dans ~/.cloudflared."
+    [ "$tr_refuse" = 0 ] || return 3
     return 10
   fi
+  [ "$tr_refuse" = 0 ] || return 3
   [ "$prc" = 0 ] || [ "$prc" = 2 ] || return 1
   return "$prc"
 }
@@ -1274,8 +1297,12 @@ cc_depart_verifie() {
 # Code de sortie (le détail de ce qui reste est dans CC_DEPART_RESTE et CC_DEPART_NOTE) :
 #   0 = rien ne reste, relu sur le disque ; 14 = rien n'a été fait (désinstalleur absent ou altéré, ou
 #   manifeste signé absent/invalide) ;
-#   15 = le Trousseau ne répond pas (verrouillé, accès refusé) : rien n'a été effacé, déverrouille-le puis
-#   relance (pré-contrôle avant tout effacement : le nom d'un service se calcule depuis le dossier du profil) ;
+#   15 = le Trousseau refuse (verrouillé, accès refusé) : l'INSTALLATION EST CONSERVÉE (dossier, profils, commandes,
+#   menu), déverrouille-le puis relance « Partir » ; il n'y a pas de « demi-départ » dont on ne puisse revenir.
+#   Trois moments, même code : au pré-contrôle (show-keychain-info + lecture de chaque service : rien n'a été
+#   effacé), à la suppression d'un item par cc_wipe (fichiers de connexion effacés, profils gardés), puis à celle
+#   d'uninstall.sh (son propre pré-contrôle, ou un item refusé : il ne supprime alors ni le dossier ni les
+#   commandes). Le nom d'un service se calcule depuis le dossier du profil : c'est pourquoi les profils restent ;
 #   2, 10, 11, 12 = codes d'uninstall.sh (refusé, jetons Access, purge incomplète, dossier non supprimé) ;
 #   2 aussi si cc_wipe a vu une session Claude encore ouverte ; 1, 10 = codes de cc_wipe quand le
 #   désinstalleur n'a pas pu les corriger ; 13 = il reste quelque chose que personne n'avait signalé.
@@ -1305,19 +1332,23 @@ cc_depart() {
   cc_wipe || wrc=$?
   CC_DEPART_NOTE="${CC_WIPE_NOTE:-}"
   if [ "$wrc" = 3 ]; then
-    # Le Trousseau a répondu au relevé puis plus à l'effacement (verrouillé entre-temps) : rien n'est supprimé.
+    # Le Trousseau a répondu au relevé puis refusé à l'effacement (verrouillé entre-temps) : cc_wipe a laissé les
+    # dossiers de profil (de quoi rejouer), et on ne lance PAS le désinstalleur : l'installation est conservée.
     rm -rf "$tmpd"
+    CC_DEPART_NOTE="${CC_DEPART_NOTE}${CC_DEPART_NOTE:+$'\n'}L'installation est CONSERVÉE (rien du dossier n'est supprimé) : déverrouille le Trousseau puis relance « Partir »."
     return 15
   fi
-  # Le dossier courant ne doit pas être celui qu'on supprime.
-  cd / 2>/dev/null || true
-  BALUCHON_DIR="$ROOT" bash "$copie" --oui < /dev/null > /dev/null || urc=$?
+  # Le dossier courant ne doit pas être celui qu'on supprime : le `cd /` est celui d'un sous-shell, pour que le
+  # menu, si l'installation est conservée (code 15), reprenne là où il était.
+  ( cd / 2>/dev/null || true; BALUCHON_DIR="$ROOT" bash "$copie" --oui < /dev/null > /dev/null ) || urc=$?
   rm -rf "$tmpd"
-  # Le désinstalleur a son propre pré-contrôle du Trousseau (code 15, « rien n'est supprimé ») : ici cc_wipe a
-  # déjà tourné, ce serait faux. Le Trousseau a donc lâché entre les deux : c'est une purge incomplète.
+  # Le désinstalleur sort en 15 quand le Trousseau a refusé (son pré-contrôle, ou la suppression d'un item) :
+  # il n'a alors supprimé NI le dossier NI les commandes. Ce n'est pas une purge incomplète à constater après
+  # coup : l'installation est là, intacte, et « Partir » se rejoue. Le menu doit donc le dire (pas de relevé du
+  # disque : le dossier existe, c'est voulu).
   if [ "$urc" = 15 ]; then
-    urc=11
-    CC_DEPART_NOTE="${CC_DEPART_NOTE}${CC_DEPART_NOTE:+$'\n'}Le Trousseau a cessé de répondre pendant l'effacement : des sessions peuvent y rester (verrouillé ?)."
+    CC_DEPART_NOTE="${CC_DEPART_NOTE}${CC_DEPART_NOTE:+$'\n'}Le Trousseau a refusé la suppression de sessions (verrouillé ?). L'installation est CONSERVÉE (dossier, profils et commandes sont là, rien n'est supprimé) : déverrouille le Trousseau puis relance « Partir »."
+    return 15
   fi
   # Le disque relu fait foi : le désinstalleur refait lui-même la purge et l'oubli des jetons, donc un
   # échec de cc_wipe suivi d'une désinstallation complète n'est plus un échec. Ce que le disque ne voit

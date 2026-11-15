@@ -26,7 +26,12 @@
 #      `config` est un lien : jamais suivi ; Trousseau verrouillé AVANT l'effacement : code 15, rien n'est supprimé
 #      et la relance après déverrouillage va au bout (4e passe) ; verrouillé PENDANT l'effacement : « sessions non
 #      vérifiées », jamais « Rien ne reste » ; cache d'exécution (~/.cache/baluchon) retiré avec des bornes sûres
-#      ou nommé s'il reste.
+#      ou nommé s'il reste ;
+#    - (phase 1d, sections 3d, 3e, 3f) le Trousseau doit être DÉVERROUILLÉ (`security show-keychain-info`, pas seulement
+#      une lecture qui répond) ; s'il refuse la SUPPRESSION d'un item (36, 51) après un pré-contrôle réussi, l'installation
+#      est CONSERVÉE (code 15, profils gardés, désinstalleur non lancé, ou lancé puis sorti en 15 sans rien supprimer), le menu
+#      le dit et revient ; la relance après « déverrouillage » va au bout. Contrôle négatif : le code de 0cc9c24 supprimait
+#      le dossier et les profils. FAUX `security` : le vrai Trousseau n'est jamais touché.
 #  Contrôles positifs : l'ANCIEN Claude.command (c0172f7) ne propose pas « Partir » ; l'ANCIEN code (1238b14) exécute
 #  un désinstalleur remplacé, suit un lien sur `config`, lit un Trousseau verrouillé comme « absent » et oublie le
 #  cache : chaque épreuve nouvelle échouerait contre lui.
@@ -159,9 +164,16 @@ cat > "$FAUX/security" <<'SEC'
 # verrouillé : ni présent ni absent) ; CTL/trousseau-find-verrouille = seule la lecture répond 36 ;
 # CTL/trousseau-find-verrouille-apres = la lecture ne répond 36 qu'APRÈS la première suppression (le Trousseau se
 # verrouille pendant l'effacement : le pré-contrôle a passé, la relecture finale ne le peut plus).
+# Phase 1d : `show-keychain-info` répond 0 (déverrouillé), ou 36 si CTL/trousseau-verrouille ou CTL/trousseau-info-verrouille
+# (le Trousseau est verrouillé MAIS la lecture d'attributs répond encore : seul show-keychain-info le dit) ;
+# CTL/trousseau-delete-code = la suppression répond ce code (36, 51…) alors que la lecture et show-keychain-info
+# répondent bien ; CTL/trousseau-delete-refus-svc = liste de services dont SEULE la suppression répond 36.
 c="${GUM_CTL:?}"; f="$c/trousseau"; sub="${1:-}"; shift || true
 svc=""; while [ $# -gt 0 ]; do [ "$1" = -s ] && { svc="$2"; shift; }; shift; done
 case "$sub" in
+  show-keychain-info)
+    [ ! -e "$c/trousseau-verrouille" ] && [ ! -e "$c/trousseau-info-verrouille" ] || exit 36
+    exit 0 ;;
   find-generic-password)
     [ ! -e "$c/trousseau-verrouille" ] && [ ! -e "$c/trousseau-find-verrouille" ] || exit 36
     if [ -e "$c/trousseau-find-verrouille-apres" ] && [ -s "$c/security.log" ]; then exit 36; fi
@@ -169,6 +181,8 @@ case "$sub" in
   delete-generic-password)
     echo "delete $svc" >> "$c/security.log"
     [ ! -e "$c/trousseau-verrouille" ] || exit 36
+    [ ! -e "$c/trousseau-delete-code" ] || exit "$(cat "$c/trousseau-delete-code")"
+    ! grep -qxF -- "$svc" "$c/trousseau-delete-refus-svc" 2>/dev/null || exit 36
     [ ! -e "$c/trousseau-refus" ] || exit 1
     [ ! -e "$c/trousseau-ment" ] || exit 0
     grep -qxF -- "$svc" "$f" 2>/dev/null || exit 44
@@ -280,13 +294,16 @@ vrai_si "2. …le dossier a bien été effacé malgré tout" test ! -e "$R"
 if [ "$TROUSSEAU" = 1 ]; then
   monde trousseau-refuse
   : > "$CTL/trousseau-refus"
-  choix Partir; printf '0\n' > "$CTL/confirm-rc"
-  joue
   # Le noyau dit 1, puis le repli bash de cc_purge_sessions voit lui-même le refus de `security` (code 1, ni 0
-  # ni 44) : avant, ce refus était avalé (code 13 par la seule relecture) ; maintenant l'effacement des sessions
-  # est dit mal fait (code 1). Le Trousseau relu à la fin nomme l'item.
-  egal "3. item du Trousseau refusé (le noyau dit 1, security refuse) : code 1, relevé sur le Trousseau" 1 "$RC"
-  dit "3. …l'item est NOMMÉ" "Trousseau : l'item « Claude Code-credentials-"
+  # ni 44) : avant, ce refus était avalé (code 13 par la seule relecture), puis (jusqu'à la phase 1d) l'effacement était dit
+  # mal fait (code 1) APRÈS avoir supprimé le dossier et donc les profils. Maintenant (phase 1d) : l'installation est
+  # CONSERVÉE, le menu le dit et revient (rien ne se perd, « Partir » se rejoue : voir 3e pour la relance).
+  # `choix Partir Quitter` : le menu revient, puis se ferme proprement.
+  choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  egal "3. item du Trousseau refusé (le noyau dit 1, security refuse) : le menu revient et se ferme (code 0)" 0 "$RC"
+  dit "3. …le menu dit que l'installation est CONSERVÉE" "installation est CONSERVÉE"
+  vrai_si "3. …l'installation est là (profils, menu, désinstalleur) : « Partir » se rejoue" test -d "$R/config/perso" -a -d "$R/config/pro" -a -f "$R/Claude.command" -a -f "$R/uninstall.sh"
   ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
   # Un noyau qui répond 0 sans avoir rien effacé : personne ne le signale, seul le disque relu le dit (13).
   monde noyau-menteur
@@ -345,6 +362,89 @@ if [ "$TROUSSEAU" = 1 ]; then
   egal "3. Trousseau verrouillé PENDANT l'effacement (relecture impossible) : code 13 (jamais 0)" 13 "$RC"
   dit "3. …dit « sessions non vérifiées »" "sessions non vérifiées"
   ne_dit_pas "3. …jamais « Rien ne reste »" "Rien ne reste"
+
+  # (phase 1d) Le Trousseau est VERROUILLÉ mais la LECTURE d'attributs répond encore (0/44) : seul `security
+  # show-keychain-info` (36) le dit. Avant : le pré-contrôle passait, puis les suppressions échouaient. Maintenant :
+  # refus AVANT toute suppression (code 15), le menu revient. FAUX `security` : le vrai Trousseau n'est jamais touché.
+  monde trousseau-info-verrouille
+  : > "$CTL/trousseau-info-verrouille"
+  choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  egal "3d. show-keychain-info 36 alors que la lecture répond : le menu revient et se ferme (code 0)" 0 "$RC"
+  dit "3d. …c'est dit : Trousseau verrouillé, show-keychain-info nommé" "show-keychain-info"
+  dit "3d. …et que rien n'a été effacé" "Rien n'a été effacé"
+  ne_dit_pas "3d. …jamais « Rien ne reste »" "Rien ne reste"
+  vrai_si "3d. …RIEN n'est supprimé : profils, menu, désinstalleur et jetons Access sont là" \
+    test -f "$R/config/perso/.credentials.json" -a -f "$R/config/pro/.credentials.json" -a -f "$R/Claude.command" -a -f "$R/uninstall.sh" -a -n "$(ls -A "$H/.cloudflared")"
+  vrai_si "3d. …le Trousseau n'a reçu AUCUNE demande de suppression" test ! -s "$CTL/security.log"
+  rm -f "$CTL/trousseau-info-verrouille"
+  choix Partir; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  egal "3d. …déverrouillé, on relance « Partir » : code 0" 0 "$RC"
+  dit "3d. …et « Rien ne reste »" "Rien ne reste"
+  vrai_si "3d. …le dossier a disparu" test ! -e "$R"
+
+  # (phase 1d) Le Trousseau répond au pré-contrôle (show-keychain-info 0, lecture 0), PUIS refuse la suppression (36 : verrouillé
+  # entre-temps ; 51 : autre refus). Avant : les profils, donc le nom des items, disparaissaient avec le dossier et « Partir »
+  # ne se rejouait plus. Maintenant : cc_wipe laisse les dossiers de profil, cc_depart rend 15 SANS lancer le désinstalleur,
+  # le menu dit que l'installation est CONSERVÉE et revient ; la relance « déverrouillée » va au bout.
+  for refus in 36 51; do
+    monde "trousseau-delete-refuse-$refus"
+    printf '%s\n' "$refus" > "$CTL/trousseau-delete-code"
+    choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+    joue
+    egal "3e. ($refus) lecture 0 puis suppression refusée : le menu revient et se ferme (code 0), pas de sortie « Partir » en 11" 0 "$RC"
+    dit "3e. …($refus) le menu dit que l'installation est CONSERVÉE" "installation est CONSERVÉE"
+    dit "3e. …($refus) et que « Partir » se relance après déverrouillage" "déverrouille le Trousseau puis relance « Partir »"
+    ne_dit_pas "3e. …($refus) jamais « Rien ne reste »" "Rien ne reste"
+    ne_dit_pas "3e. …($refus) jamais « Il reste quelque chose » (ce n'est pas un départ à moitié fini : l'installation est là)" "Il reste quelque chose"
+    vrai_si "3e. …($refus) l'installation est là : dossiers de profil, ACTIVE, menu, désinstalleur, commandes" \
+      test -d "$R/config/perso" -a -d "$R/config/pro" -a -f "$R/ACTIVE" -a -f "$R/Claude.command" -a -f "$R/uninstall.sh" -a -e "$H/.local/bin/baluchon"
+    vrai_si "3e. …($refus) le Trousseau garde ses trois items (seule la suppression a été demandée, refusée)" test "$(wc -l < "$CTL/trousseau" | tr -d ' ')" = 3
+    vrai_si "3e. …($refus) le désinstalleur n'a PAS été lancé (un seul oubli des jetons Access : celui de cc_wipe, pas un second)" test "$(grep -c forget-access "$CTL/core.log" 2>/dev/null)" = 1
+    rm -f "$CTL/trousseau-delete-code"
+    choix Partir; printf '0\n' > "$CTL/confirm-rc"
+    joue
+    egal "3e. …($refus) Trousseau déverrouillé, on relance « Partir » : code 0" 0 "$RC"
+    dit "3e. …($refus) et « Rien ne reste »" "Rien ne reste"
+    vrai_si "3e. …($refus) le dossier a disparu" test ! -e "$R"
+    vrai_si "3e. …($refus) et les commandes aussi" test ! -e "$H/.local/bin/baluchon"
+    egal "3e. …($refus) et il ne reste que la session du Claude Code NORMAL au Trousseau" "Claude Code-credentials" "$(cat "$CTL/trousseau")"
+  done
+
+  # (phase 1d) Le désinstalleur lui-même sort en 15 (c'est son propre refus de supprimer un item) APRÈS que cc_wipe a réussi sur
+  # les profils ordinaires : un profil qui est un LIEN (config/lien, jamais suivi par cc_wipe) reste, son item du Trousseau est
+  # supprimé par uninstall.sh, et le Trousseau refuse CELUI-LÀ. Avant : urc 15 devenait 11 « purge incomplète » et le dossier
+  # avait déjà été supprimé. Maintenant : installation conservée, code 15, le menu le dit.
+  monde trousseau-uninstall-refuse
+  mkdir -p "$T/cible-lien"; printf 'precieux\n' > "$T/cible-lien/these.txt"; ln -s "$T/cible-lien" "$R/config/lien"
+  service_de "$R/config/lien" >> "$CTL/trousseau"; service_de "$R/config/lien" > "$CTL/trousseau-delete-refus-svc"
+  choix Partir Quitter; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  egal "3f. le désinstalleur refuse un item (profil lien) : le menu revient et se ferme (code 0)" 0 "$RC"
+  dit "3f. …le menu dit que l'installation est CONSERVÉE" "installation est CONSERVÉE"
+  dit "3f. …et que « Partir » se relance après déverrouillage" "déverrouille le Trousseau puis relance « Partir »"
+  vrai_si "3f. …l'installation est là (dossier, menu, désinstalleur, commandes) et la cible du lien intacte" \
+    test -f "$R/Claude.command" -a -f "$R/uninstall.sh" -a -e "$H/.local/bin/baluchon" -a -L "$R/config/lien" -a "$(cat "$T/cible-lien/these.txt")" = precieux
+  ne_dit_pas "3f. …jamais « Rien ne reste »" "Rien ne reste"
+  rm -f "$CTL/trousseau-delete-refus-svc"
+  choix Partir; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  vrai_si "3f. …Trousseau déverrouillé, on relance « Partir » : le dossier a disparu, la cible du lien est intacte" \
+    test ! -e "$R" -a "$(cat "$T/cible-lien/these.txt")" = precieux
+
+  # Contrôle négatif de la phase 1d : le code de 0cc9c24 supprimait le dossier (donc les profils) malgré le refus d'un item.
+  ANCIEN_1D=0cc9c24; AN1D="$BASE/anciens-fichiers-1d"; mkdir -p "$AN1D"
+  if git -C "$DEPOT" show "$ANCIEN_1D:lib/common.sh" > "$AN1D/common.sh" 2>/dev/null && git -C "$DEPOT" show "$ANCIEN_1D:uninstall.sh" > "$AN1D/uninstall.sh" 2>/dev/null \
+     && git -C "$DEPOT" show "$ANCIEN_1D:Claude.command" > "$AN1D/Claude.command" 2>/dev/null && [ -s "$AN1D/common.sh" ]; then
+    MONDE_LIB="$AN1D/common.sh" MONDE_UN="$AN1D/uninstall.sh" monde ancien-trousseau-1d "$AN1D/Claude.command"
+    printf '36\n' > "$CTL/trousseau-delete-code"
+    choix Partir; printf '0\n' > "$CTL/confirm-rc"
+    joue
+    vrai_si "3e. CONTRÔLE NÉGATIF : le code de 0cc9c24 supprimait le dossier et les profils malgré le refus du Trousseau (Partir ne se rejouait plus)" test ! -e "$R/config/perso" -a ! -e "$R"
+  else
+    echo "(!) historique git absent : le contrôle négatif de la phase 1d ($ANCIEN_1D) est sauté"
+  fi
   # Contrôle positif du pré-contrôle : l'ANCIEN code (af1d389, avant cette passe) supprimait les profils et le dossier
   # alors que le Trousseau était verrouillé : le nom des items n'existait plus nulle part, « Partir » ne se rejouait plus.
   ANCIEN_P6=af1d389; AN6="$BASE/anciens-fichiers-p6"; mkdir -p "$AN6"
