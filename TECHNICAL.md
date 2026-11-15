@@ -8,7 +8,7 @@
 | `lib/common.sh` | Plateforme, téléchargements vérifiés (fail-closed), mises à jour, choix du noyau, purge de repli. « Tout effacer » (`cc_wipe`) rend 0, 2 (session encore ouverte), 10 (jetons Cloudflare Access restés utilisables, y compris ceux des hôtes notés dans `.baluchon-acces` : `config/remote.conf` et `.baluchon-acces` sont alors gardés pour qu'une nouvelle tentative sache quel hôte oublier) ou 1, avec `CC_WIPE_NOTE` qui nomme ce qui reste ; le menu ne dit « ✓ Effacé » que sur 0. Épreuves : `scripts/effacement.test.sh <dossier-vide-absolu>`. |
 | `core/` → `baluchon-core` | Noyau Rust : comptes, statut, forfait, quotas, lancement verrouillé, outils Windows, accès distant. Contrat CLI versionné (`baluchon-core --contract`). |
 | `claude.cmd` / `claude-classic.cmd` | Lanceurs Windows (wizard / repli 100 % batch). |
-| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs et `uninstall.sh` sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install` ; voir « Un seul lien chez le client ») ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique), et tout dossier dont un ANCÊTRE peut être modifié par un autre utilisateur (écriture de groupe ou du monde sans bit sticky, propriétaire étranger). L'effacement part du dossier PARENT figé (identité périphérique:inode revérifiée, nom relatif) : un maillon échangé contre un lien après le jugement donne un refus. Un ménage incomplet (jetons Access, sessions du Trousseau, dossier non supprimé en entier) sort en code 10, 11 ou 12 avec un bilan qui nomme ce qui reste, jamais « Plus aucune trace ». Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
+| `install.sh` / `install.ps1` / `uninstall.sh` | Installation depuis la release signée (les deux installeurs et `uninstall.sh` sont eux-mêmes des assets signés de la release, et posent le marqueur `.baluchon-install` ; voir « Un seul lien chez le client ») ; désinstallation, qui refuse tout dossier sans ce marqueur, `/`, le domicile et ses parents (chemin canonique), et tout dossier dont un ANCÊTRE peut être modifié par un autre utilisateur (écriture de groupe ou du monde sans bit sticky, propriétaire étranger). L'effacement part du dossier PARENT figé (identité périphérique:inode revérifiée, nom relatif) : un maillon échangé contre un lien après le jugement donne un refus. Un ménage incomplet (jetons Access, sessions du Trousseau, dossier non supprimé en entier) sort en code 10, 11 ou 12 avec un bilan qui nomme ce qui reste, jamais « Plus aucune trace » ; un Trousseau verrouillé ou inaccessible est vu AVANT toute suppression (code 15, rien n'est effacé). Épreuves : `scripts/uninstall.test.sh <dossier-vide-absolu>`. |
 | `scripts/build-core.sh` | Compile `baluchon-core` pour darwin-arm64/x64, linux-x64/arm64 (musl statique), win32-x64 (zig + cargo-zigbuild). |
 | `scripts/release.sh` | Assemble la release à plat, `SHA256SUMS` signé, contre-vérifié avec la clé embarquée. |
 | `overlay/` | Optionnel. Une couche posée à côté du portable (voir « Couches »). Le portable n'y écrit jamais. |
@@ -300,7 +300,9 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
   (`cd /`), joue la copie du désinstalleur (une seule source des gardes de chemin), puis **relit le
   disque** : le menu n'écrit « Rien ne reste sur cet ordinateur » que si dossier, commandes, items du
   Trousseau, jetons Access et cache d'exécution sont réellement partis, sinon il liste le reste.
-  Codes : 0 rien ne reste, 14 rien fait, 2 / 10 / 11 / 12 ceux d'`uninstall.sh` ou de `cc_wipe`, 13 un
+  Codes : 0 rien ne reste, 14 rien fait (désinstalleur non authentique), 15 rien fait (Trousseau
+  verrouillé ou inaccessible, pré-contrôlé avant tout effacement ; le menu revient intact, relancer
+  après déverrouillage), 2 / 10 / 11 / 12 ceux d'`uninstall.sh` ou de `cc_wipe`, 13 un
   reste que personne n'avait signalé. Aucun journal n'est écrit après l'effacement (il recréerait le
   dossier). Sur un poste invité, « Partir » est en tête du menu.
   - **Niveau de confiance, dit en clair** : « Partir » fait confiance à ce que fait confiance le menu
@@ -312,15 +314,62 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
     absolu et physique, ni `/`, ni le domicile, ni un parent du domicile, propriétaire = l'utilisateur).
     Un `config` qui est un lien symbolique n'est ni énuméré ni purgé (le noyau et le repli ne le
     suivent pas) : c'est dit, le code n'est jamais 0. Un profil lien est laissé en place et nommé. Les
-    suppressions partent d'un `cd -P` dans `config` et passent par des noms relatifs.
+    suppressions partent d'un `cd -P` dans `config` et passent par des noms relatifs. Cela vaut aussi
+    pour le noyau Rust (`list_profiles` lit le type de l'ENTRÉE et non sa cible ; `purge` refuse un
+    `config` lien, une entrée lien ou un profil lien AVANT de prendre le verrou, et un chemin
+    d'extension qui traverse un sous-dossier lien ; le verrou de purge ne crée jamais de fichier dans
+    la cible d'un lien) et pour `cc_purge_sessions` (repli bash : s'il y a un lien, le noyau n'est pas
+    appelé, le repli traite les vrais profils et nomme chaque lien). `uninstall.sh` (étape 2) sort en
+    code 11 en nommant les liens, supprime quand même le Trousseau des vrais profils, et son `rm -rf`
+    du dossier retire le lien sans entrer dans sa cible.
+  - **Aucune écriture à un nom prévisible** : `cc_ecrire` / `cc_poser` (bibliothèque) et `poser`
+    (`install.sh`) écrivent dans un temporaire au nom imprévisible (`$$` + trois `$RANDOM`) ouvert en
+    création exclusive (`set -C`, `O_EXCL`), par ce descripteur, puis `mv` REMPLACE la destination : un
+    lien posé d'avance disparaît et sa cible reste intacte ; un dossier à la place de la destination est
+    refusé. Y passent les références (`cc_ref_set`/`cc_ref_drop`), le téléchargement de Claude et du
+    noyau, la mise à jour, le retour arrière, les sommes/signature/relevé de release, le relevé de
+    cache, la mémoire de Claude stable et les écritures de `ACTIVE` du menu. L'installeur revérifie
+    l'empreinte sur le fichier POSÉ, pas sur le téléchargement.
+  - **`gum`** : tout se passe dans un dossier privé ; l'empreinte de référence est calculée sur le
+    binaire EXTRAIT, le fichier posé doit avoir exactement cette empreinte (sinon il est retiré), et
+    « présent » ne suffit plus sur une installation : un `gum` recréé pendant un téléchargement échoué
+    n'a pas de référence, donc n'est pas accepté (`cc_ensure_gum` rend 1).
+  - **Limites dites** : `symlink_metadata` puis l'action laissent une fenêtre de course (la garantie
+    complète demande `openat`/`O_NOFOLLOW`/`unlinkat` par libc : non fait) ; un autre compte qui peut
+    écrire dans le dossier ET lire le nom du temporaire pendant sa courte vie pourrait l'échanger ;
+    Windows (jonctions) n'est pas couvert.
   - **Trousseau** : `security` répond 0 (supprimé) ou 44 (l'item n'existait pas) ⇒ « plus rien » ; toute
     autre réponse (Trousseau verrouillé, accès refusé, outil absent) n'établit RIEN : « sessions non
-    vérifiées », code non nul, jamais « Rien ne reste ».
+    vérifiées », code non nul, jamais « Rien ne reste ». **Pré-contrôle avant toute suppression** : un
+    Trousseau verrouillé ne doit pas laisser un effacement À MOITIÉ fait (profils, jetons et commandes
+    partis, sessions encore au Trousseau). Sur macOS, `cc_depart` (après le relevé), `cc_wipe` et
+    `uninstall.sh` (étape « 0) », avant tout crochet ou noyau) LISENT d'abord chaque item
+    (`find-generic-password`, un par profil de `config/*/` et par chemin physique) : une réponse 0 ou
+    44 laisse passer, toute autre arrête TOUT avant d'effacer quoi que ce soit : « Partir » et
+    `uninstall.sh` sortent en **code 15**, `cc_wipe` et `cc_purge_sessions` en **code 3**, avec la
+    consigne « déverrouille le Trousseau puis relance » ; rien n'est supprimé, la relance après
+    déverrouillage termine normalement. Limite dite : ce pré-contrôle est une LECTURE ; elle prouve que
+    le Trousseau est joignable, pas qu'une suppression réussira. Un verrouillage entre le pré-contrôle
+    et la suppression est vu par la suppression elle-même (code 3 de la purge, qui remonte en code 1
+    de `cc_wipe` et 11 d'`uninstall.sh`, avec « des sessions restent au Trousseau »), jamais en
+    « Rien ne reste ».
   - **Cache d'exécution** : sur une clé montée sans exécution, `${XDG_CACHE_HOME:-~/.cache}/baluchon`
-    reçoit des copies des binaires ; `.baluchon-cache` en note les dossiers. `cc_wipe`/`uninstall.sh`
-    ne retirent QUE ces dossiers, strictement sous la base, sans `..` ni `//`, vrais dossiers à
-    l'utilisateur, aucun composant lien, puis les parents devenus vides (jamais un parent non vide). Ce
-    qui ne tient pas ces bornes n'est jamais suivi ; ce qui reste est nommé (code 12).
+    reçoit des copies des binaires ; `.baluchon-cache` en note les dossiers ET, une fois, la BASE qui
+    les porte (ligne `base <cache>/baluchon`) : un `XDG_CACHE_HOME` différent au moment de partir ne
+    fait donc plus oublier le cache. Les bases jugées sont `~/.cache/baluchon`, celle du `XDG_CACHE_HOME`
+    courant et les lignes `base` du fichier ; une base doit être absolue, sans `..`, `//`, retour à la
+    ligne, finir par `/baluchon`, avoir un parent qui n'est pas `/` et ne pas être un lien. Une ligne
+    qui ne tient pas ces bornes est ignorée, jamais suivie. `uninstall.sh` ne retire QUE les entrées
+    notées sous une base ainsi acceptée, et seulement depuis un `cd -P` : la base est jugée (vrai dossier,
+    à l'utilisateur), puis chaque dossier du chemin est ENTRÉ un par un (`cd -P ./part`, chemin physique
+    contrôlé) et jugé ; la feuille est effacée par `rm -rf -- ./feuille` RELATIF, puis les parents
+    devenus vides par `rmdir -- ./nom` (jamais un parent non vide). Un dossier du chemin qui est un lien,
+    qui n'est pas à l'utilisateur, ou que d'autres peuvent modifier (écriture du monde, ou du groupe
+    sauf groupe privé du même nom que l'utilisateur ; le bit sticky n'est PAS une exemption) fait
+    refuser l'entrée : aucun `rm` n'est lancé, c'est nommé (code 12), jamais « Plus aucune trace ».
+    Limite dite : entre le dernier contrôle de la feuille et le `rm -rf` relatif, un tiers qui peut
+    déjà écrire dans le dossier juste au-dessus pourrait encore l'échanger ; la garantie complète
+    demanderait `openat`/`O_NOFOLLOW`/`unlinkat` (libc), non faits en shell.
 - **Épreuves** : `scripts/lien-unique.test.sh <dossier-vide-absolu>` (installeur contre une release
   locale signée avec une clé d'essai, faux `curl`/`gum`/`security`, HOME jetable : première
   installation, « à jour » sans téléchargement, relevé absent, fichier altéré, autre release,
@@ -331,8 +380,10 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
   verrouillé, noyau menteur, annulation, désinstalleur illisible ou remplacé pendant le menu, manifeste
   forgé, `config` lien, cache, lien symbolique, hôte noté, contrôles positifs),
   `scripts/uninstall.test.sh` (refus de chemins, noyau et crochet jamais lancés sans empreinte
-  authentifiée, `config` lien, Trousseau verrouillé, cache) et `scripts/effacement.test.sh` (`cc_wipe`
-  et `cc_purge_sessions` : racines douteuses, `config` ou profil lien). Chaque épreuve nouvelle est
+  authentifiée, `config` lien, Trousseau verrouillé AVANT toute suppression (code 15, rien supprimé,
+  relance après déverrouillage) ou PENDANT (code 11), cache) et `scripts/effacement.test.sh` (`cc_wipe`
+  et `cc_purge_sessions` : racines douteuses, `config` ou profil lien, Trousseau verrouillé : code 3
+  sans rien toucher, ou refus de la suppression après une lecture réussie : code 1). Chaque épreuve nouvelle est
   rejouée contre l'ancien code (lu dans l'historique git) et doit y échouer. Les essais posent une clé
   de signature JETABLE à la place de celle du produit.
 - **Limite connue** : Windows (`install.ps1`, menu) n'a pas encore cette chaîne.
