@@ -153,6 +153,9 @@ else
   # ailleurs que d'une branche (une amorce de déploiement, par exemple) les prend ICI, vérifiés contre
   # SHA256SUMS, au lieu d'exécuter ce que `main` contient ce jour-là (revue Codex terminale).
   assets+=("install.sh"$'\t'"$ROOT/install.sh" "install.ps1"$'\t'"$ROOT/install.ps1")
+  # Le désinstalleur est signé lui aussi : l'entrée « Partir » du menu l'exécute depuis l'installation,
+  # donc il doit y arriver vérifié contre SHA256SUMS comme tout ce que le menu exécute (install.sh le pose).
+  assets+=("uninstall.sh"$'\t'"$ROOT/uninstall.sh")
   for plat in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
     exe=""; [ "$plat" = win32-x64 ] && exe=.exe
     src="$ROOT/dist/$plat/baluchon-core$exe"

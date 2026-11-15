@@ -2,6 +2,7 @@
 # ============================================================
 #  Baluchon — installeur macOS / Linux
 #  Usage :  curl -fsSL https://raw.githubusercontent.com/atelier-sam/baluchon/main/install.sh | bash
+#           (puis ouvrir le menu tout de suite :  … | BALUCHON_OUVRIR_MENU=1 bash)
 #  Installe le wizard + le noyau baluchon-core + le binaire Claude + gum dans
 #  ~/.baluchon, et les commandes courtes « baluchon » et « baluchon1 » (alias : « ccp », « ccp1 »).
 #
@@ -10,8 +11,20 @@
 #  posé. Le binaire Claude est vérifié contre le manifest officiel d'Anthropic.
 #  Aucun secret : tes sessions restent locales dans ~/.baluchon/config.
 #
+#  Relancé sur une installation DÉJÀ À JOUR (mêmes sommes signées, mêmes fichiers), il ne télécharge
+#  rien de lourd et ne touche à rien : il dit « déjà installé » et, si demandé, ouvre le menu. Relancé
+#  sur une autre release, il refait l'installation complète (mise à jour).
+#
 #  Ce script n'écrit que les fichiers publics et bin/. Si une couche est posée dans
 #  overlay/, il ne la touche pas : il appelle seulement son crochet `update` à la fin.
+#
+#  Variables (toutes facultatives) :
+#    BALUCHON_DIR           dossier d'installation (défaut ~/.baluchon)
+#    CCP_DL                 source de la release (recette locale ; la signature reste exigée)
+#    BALUCHON_OUVRIR_MENU   1 = ouvre le menu à la fin, sur le terminal (/dev/tty). Sans terminal,
+#                           dit la commande à taper et réussit quand même. Défaut : 0.
+#    BALUCHON_ETAT_SORTIE   fichier où écrire « installe » ou « a-jour » (pour l'amorce de l'atelier,
+#                           qui s'en sert pour savoir si elle doit encore poser sa couche).
 # ============================================================
 set -euo pipefail
 
@@ -21,31 +34,12 @@ CCP_SIGNER='baluchon-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIRcs8TrzgdQa1D
 CCP_SIGNER_ID="${CCP_SIGNER%% *}"
 DIR="${BALUCHON_DIR:-$HOME/.baluchon}"
 BINDIR="$HOME/.local/bin"
+W=""   # dossier de travail temporaire, global : le piège EXIT le lit
 
 say() { printf '\033[36m• %s\033[0m\n' "$*"; }
 ok()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 sha() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
-
-command -v curl >/dev/null 2>&1 || die "curl est requis."
-command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen est requis pour authentifier la release (paquet openssh-client)."
-
-W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
-say "Installation de Baluchon dans $DIR"
-
-# 1) Sommes signées de la release
-{ curl -fsSL "$CCP_DL/SHA256SUMS" -o "$W/SHA256SUMS" && curl -fsSL "$CCP_DL/SHA256SUMS.sig" -o "$W/SHA256SUMS.sig"; } \
-  || die "Release injoignable (réseau ?)."
-printf '%s\n' "$CCP_SIGNER" > "$W/allowed_signers"
-ssh-keygen -Y verify -f "$W/allowed_signers" -I "$CCP_SIGNER_ID" -n file -s "$W/SHA256SUMS.sig" < "$W/SHA256SUMS" >/dev/null 2>&1 \
-  || die "Signature de la release INVALIDE : installation annulée."
-ok "Release authentifiée (signature $CCP_SIGNER_ID)"
-
-# Le marqueur par lequel uninstall.sh reconnaît CE dossier comme une installation de Baluchon : sans
-# lui, la désinstallation refuse d'effacer quoi que ce soit (revue Codex : une comparaison de
-# chaînes ne protège pas le domicile). Posé AVANT tout le reste, après la signature.
-mkdir -p "$DIR"
-printf 'baluchon-install 1\n' > "$DIR/.baluchon-install"
 
 # Télécharge un fichier de la release et le vérifie contre SHA256SUMS. $1 = nom publié, $2 = destination.
 fetch() {
@@ -57,55 +51,136 @@ fetch() {
   mkdir -p "$(dirname "$2")"; mv -f "$W/$1" "$2"
 }
 
-# 2) Wizard + bibliothèque, puis plateforme via la bibliothèque vérifiée
-fetch Claude.command "$DIR/Claude.command"; chmod +x "$DIR/Claude.command"
-fetch common.sh "$DIR/lib/common.sh"
-ROOT="$DIR"
-# shellcheck source=lib/common.sh
-. "$DIR/lib/common.sh"
-cc_detect_platform
+# L'installation de $DIR est-elle DÉJÀ exactement celle de cette release ? La bibliothèque posée n'est
+# exécutée que si son empreinte est celle que la release signe (sinon elle n'est pas la bonne, donc
+# l'installation n'est pas à jour, et on ne lit pas un fichier qu'on ne peut pas juger). Le jugement
+# lui-même est cc_release_a_jour (lib/common.sh), le même que celui qui écrit le relevé.
+deja_a_jour() {
+  local want
+  [ -f "$DIR/lib/common.sh" ] && [ ! -L "$DIR/lib/common.sh" ] || return 1
+  want="$(awk '$2=="common.sh" || $2=="*common.sh" {print $1; exit}' "$W/SHA256SUMS")"
+  [ -n "$want" ] && [ "$(sha "$DIR/lib/common.sh")" = "$want" ] || return 1
+  ( ROOT="$DIR"; . "$DIR/lib/common.sh"; cc_detect_platform; cc_release_a_jour "$W/SHA256SUMS" ) >/dev/null 2>&1
+}
 
-# 3) Noyau baluchon-core de cette plateforme
-fetch "baluchon-core-$CORE_PLAT" "$DIR/bin/$CORE_PLAT/baluchon-core"; chmod +x "$DIR/bin/$CORE_PLAT/baluchon-core"
-ok "Wizard + noyau baluchon-core vérifiés"
+# Installation complète : tout est vérifié contre les sommes signées AVANT d'être posé.
+installer_complet() {
+  # Le marqueur par lequel uninstall.sh reconnaît CE dossier comme une installation de Baluchon : sans
+  # lui, la désinstallation refuse d'effacer quoi que ce soit (revue Codex : une comparaison de
+  # chaînes ne protège pas le domicile). Posé AVANT tout le reste, après la signature. Le relevé
+  # « à jour » tombe tant que l'installation n'est pas finie : une coupure au milieu ne passe jamais
+  # pour une installation complète.
+  mkdir -p "$DIR"
+  printf 'baluchon-install 1\n' > "$DIR/.baluchon-install"
+  rm -f "$DIR/.baluchon-release"
 
-# 4) Claude (canal stable, vérifié contre le manifest Anthropic) + gum (empreinte épinglée)
-curl -fsSL "https://downloads.claude.ai/claude-code-releases/stable" -o "$DIR/VERSION" || die "Version de Claude introuvable."
-say "Téléchargement du binaire Claude + de l'interface… (peut prendre ~1 min)"
-( set +e; cc_ensure_binary ) || die "Échec du téléchargement de Claude."
-cc_ensure_gum >/dev/null 2>&1 || printf '\033[33m⚠ Interface gum indisponible : baluchon lancera directement le compte par défaut.\033[0m\n'
+  # 2) Wizard + bibliothèque, puis plateforme via la bibliothèque vérifiée
+  fetch Claude.command "$DIR/Claude.command"; chmod +x "$DIR/Claude.command"
+  fetch common.sh "$DIR/lib/common.sh"
+  ROOT="$DIR"
+  # shellcheck source=lib/common.sh
+  . "$DIR/lib/common.sh"
+  cc_detect_platform
+
+  # Le désinstalleur : l'entrée « Partir » du menu l'exécute. Une release qui ne le porte pas (anciennes)
+  # s'installe quand même ; il n'y a alors pas d'entrée « Partir » et la commande curl ci-dessous reste.
+  if awk '$2=="uninstall.sh" || $2=="*uninstall.sh" {f=1} END {exit !f}' "$W/SHA256SUMS"; then
+    fetch uninstall.sh "$DIR/uninstall.sh"; chmod +x "$DIR/uninstall.sh"
+  elif [ ! -f "$DIR/uninstall.sh" ]; then
+    printf '\033[33m⚠ Cette release ne porte pas de désinstalleur : « Partir » ne sera pas proposé dans le menu.\033[0m\n'
+  fi
+
+  # 3) Noyau baluchon-core de cette plateforme
+  fetch "baluchon-core-$CORE_PLAT" "$DIR/bin/$CORE_PLAT/baluchon-core"; chmod +x "$DIR/bin/$CORE_PLAT/baluchon-core"
+  ok "Wizard + noyau baluchon-core vérifiés"
+
+  # 4) Claude (canal stable, vérifié contre le manifest Anthropic) + gum (empreinte épinglée)
+  curl -fsSL "https://downloads.claude.ai/claude-code-releases/stable" -o "$DIR/VERSION" || die "Version de Claude introuvable."
+  say "Téléchargement du binaire Claude + de l'interface… (peut prendre ~1 min)"
+  ( set +e; cc_ensure_binary ) || die "Échec du téléchargement de Claude."
+  cc_ensure_gum >/dev/null 2>&1 || printf '\033[33m⚠ Interface gum indisponible : baluchon lancera directement le compte par défaut.\033[0m\n'
+}
 
 # 5) Commandes courtes : `baluchon` / `baluchon1` (2e compte) et leurs alias historiques `ccp` / `ccp1`.
-mkdir -p "$BINDIR"
-for n in baluchon ccp; do
-  cat > "$BINDIR/$n" <<EOF
+poser_commandes() {
+  local n
+  mkdir -p "$BINDIR"
+  for n in baluchon ccp; do
+    cat > "$BINDIR/$n" <<EOF
 #!/usr/bin/env bash
 exec "$DIR/Claude.command" "\$@"
 EOF
-done
-for n in baluchon1 ccp1; do
-  cat > "$BINDIR/$n" <<EOF
+  done
+  for n in baluchon1 ccp1; do
+    cat > "$BINDIR/$n" <<EOF
 #!/usr/bin/env bash
 exec env CC_PROFILE=2 "$DIR/Claude.command" "\$@"
 EOF
-done
-chmod +x "$BINDIR/baluchon" "$BINDIR/baluchon1" "$BINDIR/ccp" "$BINDIR/ccp1"
-ok "Commandes installées : baluchon  (et baluchon1 pour le 2e compte ; alias : ccp, ccp1)"
+  done
+  chmod +x "$BINDIR/baluchon" "$BINDIR/baluchon1" "$BINDIR/ccp" "$BINDIR/ccp1"
+  ok "Commandes installées : baluchon  (et baluchon1 pour le 2e compte ; alias : ccp, ccp1)"
+}
 
-# 6) Couche éventuelle (overlay/) : jamais écrite ici, seulement mise à jour par son crochet.
-cc_layer_hook update || true
+installer() {
+  local etat menu_rc=0 rc
+  command -v curl >/dev/null 2>&1 || die "curl est requis."
+  command -v ssh-keygen >/dev/null 2>&1 || die "ssh-keygen est requis pour authentifier la release (paquet openssh-client)."
 
-case ":$PATH:" in
-  *":$BINDIR:"*) ok "Tout est prêt. Tape :  baluchon" ;;
-  *)
-    rc="$HOME/.zshrc"; [ -n "${BASH_VERSION:-}" ] && [ "$(basename "${SHELL:-}")" = bash ] && rc="$HOME/.bashrc"
-    printf '\n\033[33m⚠ Ajoute %s à ton PATH :\033[0m\n' "$BINDIR"
-    printf "   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> %s && source %s\n" "$rc" "$rc"
-    printf '\033[36mEnsuite, tape :  baluchon\033[0m\n'
-    ;;
-esac
+  W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
+  say "Installation de Baluchon dans $DIR"
 
-echo
-say "Tout est rangé ici (sessions incluses) :  $DIR"
-say "Effacer juste tes comptes : dans baluchon → « Tout déconnecter »."
-say "Tout désinstaller (Trousseau compris) :  curl -fsSL https://raw.githubusercontent.com/atelier-sam/baluchon/main/uninstall.sh | bash"
+  # 1) Sommes signées de la release
+  { curl -fsSL "$CCP_DL/SHA256SUMS" -o "$W/SHA256SUMS" && curl -fsSL "$CCP_DL/SHA256SUMS.sig" -o "$W/SHA256SUMS.sig"; } \
+    || die "Release injoignable (réseau ?)."
+  printf '%s\n' "$CCP_SIGNER" > "$W/allowed_signers"
+  ssh-keygen -Y verify -f "$W/allowed_signers" -I "$CCP_SIGNER_ID" -n file -s "$W/SHA256SUMS.sig" < "$W/SHA256SUMS" >/dev/null 2>&1 \
+    || die "Signature de la release INVALIDE : installation annulée."
+  ok "Release authentifiée (signature $CCP_SIGNER_ID)"
+
+  if deja_a_jour; then
+    etat=a-jour
+    ROOT="$DIR"
+    # shellcheck source=lib/common.sh
+    . "$DIR/lib/common.sh"
+    cc_detect_platform
+    ok "Baluchon est déjà installé et à jour : rien à télécharger."
+    poser_commandes   # locale et sans risque : rend la commande à qui l'avait supprimée
+  else
+    etat=installe
+    installer_complet
+    poser_commandes
+    # 6) Couche éventuelle (overlay/) : jamais écrite ici, seulement mise à jour par son crochet.
+    cc_layer_hook update || true
+    # Le relevé « cette installation est celle de cette release » vient EN DERNIER : il n'existe que si tout
+    # ce qui précède a été posé.
+    cc_release_noter "$W/SHA256SUMS" || printf '\033[33m⚠ Relevé de release non écrit : la prochaine exécution refera tout.\033[0m\n'
+  fi
+  if [ -n "${BALUCHON_ETAT_SORTIE:-}" ]; then printf '%s\n' "$etat" > "$BALUCHON_ETAT_SORTIE" 2>/dev/null || true; fi
+
+  # Le menu, si demandé : AVANT les derniers messages, qui parlent de ce qui reste à faire une fois le menu fermé.
+  if [ "${BALUCHON_OUVRIR_MENU:-0}" = 1 ]; then
+    cc_open_menu "$DIR/Claude.command" || menu_rc=$?
+    # « Partir » a pu tout effacer : plus rien à annoncer, et le code de sortie dit ce qui reste.
+    if ! cc_est_installation "$DIR"; then exit "$menu_rc"; fi
+  fi
+
+  case ":$PATH:" in
+    *":$BINDIR:"*) ok "Tout est prêt. Tape :  baluchon" ;;
+    *)
+      rc="$HOME/.zshrc"; [ -n "${BASH_VERSION:-}" ] && [ "$(basename "${SHELL:-}")" = bash ] && rc="$HOME/.bashrc"
+      printf '\n\033[33m⚠ Ajoute %s à ton PATH :\033[0m\n' "$BINDIR"
+      printf "   echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> %s && source %s\n" "$rc" "$rc"
+      printf '\033[36mEnsuite, tape :  baluchon\033[0m\n'
+      ;;
+  esac
+
+  echo
+  say "Tout est rangé ici (sessions incluses) :  $DIR"
+  say "Effacer juste tes comptes : dans baluchon → « Tout déconnecter »."
+  say "Tout désinstaller (Trousseau compris) : dans baluchon → « Partir », ou  curl -fsSL https://raw.githubusercontent.com/atelier-sam/baluchon/main/uninstall.sh | bash"
+  exit "$menu_rc"
+}
+
+# Appelée EN DERNIER : avec `curl … | bash`, bash lit le script au fil de l'eau ; tout le texte doit être
+# arrivé avant que la moindre ligne s'exécute (une coupure réseau à mi-script n'en lance jamais la moitié).
+installer

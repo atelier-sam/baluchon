@@ -6,6 +6,9 @@
 #  Supprime TOUT : binaires, interface, sessions, l'item Trousseau macOS de chaque profil,
 #  les jetons Cloudflare Access laissés par la liaison avec le Mac, et la couche
 #  (overlay/) éventuelle, après avoir appelé son crochet `uninstall`.
+#  C'est aussi ce que fait l'entrée « Partir » du menu : elle exécute une COPIE de ce fichier, vérifiée
+#  (cmp, bash -n), car le dossier qu'on efface contient le script. Les gardes ci-dessous n'existent donc
+#  qu'ici ; le menu ne les recopie pas.
 #  Il ne supprime QUE un dossier qui porte le marqueur d'installation (.baluchon-install), qui
 #  n'est ni « / », ni ton domicile, ni un parent de ton domicile (chemin canonique, liens suivis),
 #  et dont aucun ancêtre ne peut être modifié par un autre utilisateur.
@@ -191,8 +194,22 @@ if [ -n "$CORE" ]; then
   if [ "$rc" != 0 ]; then
     incomplet 10 "Des jetons Cloudflare Access restent UTILISABLES sur cet ordinateur (code $rc) :"$'\n'"$(indente "$sortie")"
   fi
-elif [ -f "$DIR/config/remote.conf" ]; then
+elif [ -f "$DIR/config/remote.conf" ] || [ -f "$DIR/.baluchon-acces" ]; then
   incomplet 10 "Aucun noyau n'a répondu : les jetons Cloudflare Access éventuels (fichiers « …-token » de ~/.cloudflared) n'ont pas pu être effacés."
+fi
+# Les hôtes que l'AMORCE de l'atelier a notés dans .baluchon-acces (noms seulement, un par ligne) parce que
+# ses jetons Access avaient pu rester : ils ne sont pas dans config/remote.conf, donc le `forget-access`
+# sans argument ci-dessus ne les voit pas. Un nom qui n'est pas un nom d'hôte sûr est ignoré.
+if [ -n "$CORE" ] && [ -f "$DIR/.baluchon-acces" ] && [ ! -L "$DIR/.baluchon-acces" ]; then
+  while IFS= read -r h || [ -n "$h" ]; do
+    h="${h%$'\r'}"
+    case "$h" in ''|-*|.*|*.|*..*|*[!A-Za-z0-9.-]*) continue ;; esac
+    verifie_ou_refuse
+    sortie="$("$CORE" --root "$DIR" remote forget-access --host "$h" 2>&1)"; rc=$?
+    if [ "$rc" != 0 ]; then
+      incomplet 10 "Des jetons Cloudflare Access de « $h » restent UTILISABLES sur cet ordinateur (code $rc) :"$'\n'"$(indente "$sortie")"
+    fi
+  done < "$DIR/.baluchon-acces"
 fi
 
 # On efface le dossier PHYSIQUE jugé plus haut, sans repasser par son chemin : on entre dans le dossier

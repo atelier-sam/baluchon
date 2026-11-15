@@ -397,7 +397,51 @@ quit_wizard() {
     esac
   fi
   gum style --foreground "$ORANGE" --bold --margin "1 0 1 2" "À bientôt 👋"
-  if [ "$CC_OS" = win32 ]; then exit 0; else exec "${SHELL:-/bin/zsh}" -l; fi
+  # Ouvert depuis le lien d'installation (BALUCHON_DEPUIS_LIEN=1, posé par cc_open_menu), le menu est un
+  # ENFANT de l'installeur : on rend la main à qui l'a lancé, qui finit son travail (messages, nettoyage).
+  # Remplacé par un shell, il le coincerait dans un shell de connexion imbriqué.
+  if [ "$CC_OS" = win32 ] || [ "${BALUCHON_DEPUIS_LIEN:-}" = 1 ]; then exit 0; else exec "${SHELL:-/bin/zsh}" -l; fi
+}
+
+# « Partir » : tout effacer et désinstaller, depuis le menu. Proposé seulement si ce dossier se déclare une
+# installation (marqueur) ET porte son désinstalleur : jamais sur une clé qui n'a pas été posée par
+# l'installeur. Pas encore sous Windows (le désinstalleur est un script bash : phase suivante).
+can_leave() {
+  [ "$CC_OS" != win32 ] && cc_est_installation "$ROOT" && [ -f "$ROOT/uninstall.sh" ] && [ ! -L "$ROOT/uninstall.sh" ]
+}
+LEAVE_LABEL="🚪  Partir : tout effacer et désinstaller"
+do_partir() {
+  clear 2>/dev/null || true
+  can_leave || { bad "Le désinstalleur de ce dossier est absent : rien n'a été effacé."; sleep 3; return 0; }
+  # Une seule question, et « Non » par défaut : l'effacement n'a pas de retour.
+  gum confirm "Effacer tous tes comptes et désinstaller Baluchon de cet ordinateur ?" --default=false \
+    --affirmative "Oui, tout effacer" --negative "Non, annuler" --selected.background "$ORANGE" \
+    || { note "Annulé."; sleep 1; return 0; }
+  note "Effacement en cours…"
+  local code=0
+  cc_depart || code=$?
+  if [ "$code" = 14 ]; then
+    # Rien n'a été fait (désinstalleur absent ou altéré) : le menu est intact, on y revient.
+    bad "$CC_DEPART_NOTE"; sleep 4; return 0
+  fi
+  # Le dossier n'existe plus (ni gum, ni le noyau, ni la bibliothèque) : à partir d'ici, printf seul, et
+  # aucun cc_log (il recréerait logs/ dans le dossier qu'on vient d'effacer).
+  trap - EXIT HUP TERM
+  if [ "$code" = 0 ]; then
+    printf '\n  \033[32m✓ Rien ne reste sur cet ordinateur.\033[0m\n'
+    printf "  Si cet ordinateur n'est pas le tien, révoque aussi la session sur https://claude.ai.\n\n"
+  else
+    printf '\n  \033[31m⚠ Il reste quelque chose sur cet ordinateur (code %s) :\033[0m\n' "$code"
+    printf '%s' "$CC_DEPART_RESTE" | sed 's/^/    - /'
+    [ -z "$CC_DEPART_NOTE" ] || printf '%s\n' "$CC_DEPART_NOTE" | sed 's/^/    /'
+    case "$code" in
+      2|11) printf '  Une session Claude est peut-être encore ouverte : ferme-la, puis révoque la session sur https://claude.ai.\n' ;;
+      10)   printf '  Supprime à la main les fichiers dont le nom finit par « -token » dans ~/.cloudflared.\n' ;;
+      *)    printf "  Supprime à la main ce qui est listé ci-dessus : c'est encore utilisable.\n" ;;
+    esac
+    printf '\n'
+  fi
+  exit "$code"
 }
 
 # ---------- préparation ----------
@@ -445,16 +489,27 @@ probe_all
 while true; do
   render
   items=()
+  # « Partir » : en TÊTE sur un poste invité (c'est la sortie propre d'un ordinateur de passage),
+  # sinon juste avant « Quitter ». Absente si ce dossier n'est pas une installation posée par l'installeur.
+  leave_top=0; leave_bottom=0
+  if can_leave; then
+    if [ "$(host_trust)" = guest ]; then leave_top=1; else leave_bottom=1; fi
+  fi
+  [ "$leave_top" = 1 ] && items+=("$LEAVE_LABEL")
   if [ -z "$(accounts)" ]; then
     # Portable vide : la seule chose utile est d'y mettre des comptes.
     [ "$MACHINE_MISSING" -gt 0 ] && items+=("🔎  Réindexer mes comptes ($MACHINE_MISSING trouvés sur cet ordinateur)")
-    items+=("➕  Ajouter un compte" "🧰  Outils…" "⬆  Mettre à jour…" "✕  Quitter")
+    items+=("➕  Ajouter un compte" "🧰  Outils…" "⬆  Mettre à jour…")
+    [ "$leave_bottom" = 1 ] && items+=("$LEAVE_LABEL")
+    items+=("✕  Quitter")
   else
     best=""; [ -n "${CORE:-}" ] && best="$("$CORE" --root "$ROOT" accounts best 2>/dev/null | tr -d '\r\n')"
     active="$(cc_active_profile)"
     [ -n "$best" ] && items+=("▶  Lancer le compte recommandé ($best)")
     { [ -z "$best" ] || [ "$best" != "$active" ]; } && items+=("▶  Lancer le compte par défaut ($active)")
-    items+=("↪  Lancer un autre compte" "👤  Comptes…" "🧰  Outils…" "🔄  Actualiser les statuts" "⬆  Mettre à jour…" "🗑  Tout déconnecter" "✕  Quitter")
+    items+=("↪  Lancer un autre compte" "👤  Comptes…" "🧰  Outils…" "🔄  Actualiser les statuts" "⬆  Mettre à jour…" "🗑  Tout déconnecter")
+    [ "$leave_bottom" = 1 ] && items+=("$LEAVE_LABEL")
+    items+=("✕  Quitter")
   fi
   choice="$(gum choose --header "" --cursor "❯ " --cursor.foreground "$ORANGE" "${items[@]}")"; rc=$?
   if [ "$rc" -ne 0 ]; then if [ "$rc" -eq 130 ]; then continue; else break; fi; fi
@@ -469,6 +524,7 @@ while true; do
     "🔄"*) probe_all; continue ;;
     "⬆"*)  menu_update ;;
     "🗑"*) do_wipe ;;
+    "🚪"*) do_partir ;;
     "✕"*)  quit_wizard ;;
     *)     continue ;;
   esac

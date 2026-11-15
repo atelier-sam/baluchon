@@ -442,14 +442,15 @@ cc_rollback() {
 # que son propre crochet `update` met à jour (appelé en dernier, même si rien du public
 # n'a changé, pour que la couche se recale sur le public qui vient d'arriver).
 cc_update_portable() {
-  local w f sha ok=0
+  local w f sha ok=0 fail=0
   w="$(mktemp -d)" || return 1
   cc_fetch_signed_sums "$w" || { rm -rf "$w"; return 1; }
-  for f in Claude.command lib/common.sh claude.cmd claude-classic.cmd "baluchon-core-$CORE_PLAT$EXE"; do
+  # uninstall.sh : l'entrée « Partir » du menu l'exécute (copie temporaire, voir cc_depart).
+  for f in Claude.command lib/common.sh uninstall.sh claude.cmd claude-classic.cmd "baluchon-core-$CORE_PLAT$EXE"; do
     sha="$(cc_sum_for "$w/SHA256SUMS" "$(basename "$f")")"
     [ -n "$sha" ] || continue
-    curl -fsSL "$CCP_DL/$(basename "$f")" -o "$w/$(basename "$f")" || { cc_warn "$(basename "$f") injoignable"; continue; }
-    cc_check_sha "$w/$(basename "$f")" "$sha" || continue
+    curl -fsSL "$CCP_DL/$(basename "$f")" -o "$w/$(basename "$f")" || { cc_warn "$(basename "$f") injoignable"; fail=$((fail+1)); continue; }
+    cc_check_sha "$w/$(basename "$f")" "$sha" || { fail=$((fail+1)); continue; }
     case "$f" in
       baluchon-core-*) mkdir -p "$ROOT/bin/$CORE_PLAT"; mv -f "$w/$(basename "$f")" "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE"; chmod +x "$ROOT/bin/$CORE_PLAT/baluchon-core$EXE" 2>/dev/null || true ;;
       *) mkdir -p "$ROOT/$(dirname "$f")"; mv -f "$w/$(basename "$f")" "$ROOT/$f" ;;
@@ -457,6 +458,9 @@ cc_update_portable() {
     ok=$((ok+1)); cc_ok "$(basename "$f") à jour"
   done
   chmod +x "$ROOT/Claude.command" 2>/dev/null || true
+  # Le relevé « cette installation est celle de cette release » n'est posé que si TOUT a été remplacé :
+  # un fichier manqué ferait croire à install.sh que rien n'est à refaire.
+  if [ "$fail" = 0 ] && [ "$ok" -gt 0 ] && cc_est_installation "$ROOT"; then cc_release_noter "$w/SHA256SUMS" || true; fi
   rm -rf "$w"
   cc_layer_hook update || true
   [ "$ok" -gt 0 ]
@@ -505,14 +509,22 @@ cc_purge_keychain() { cc_purge_sessions; }
 # hôte oublier ; sans lui, une nouvelle tentative répondrait « aucun Mac configuré » et réussirait
 # sans rien effacer. Il ne contient aucun secret (hôte, utilisateur, options).
 cc_wipe() {
-  local prc=0 frc=0 sortie="" f
+  local prc=0 frc=0 sortie="" f h autres
   CC_WIPE_NOTE=""
   cc_purge_keychain || prc=$?
+  # Hôtes d'accès que l'amorce a signalés parce que leurs jetons pouvaient rester (.baluchon-acces) :
+  # ils ne sont pas dans remote.conf, donc le `forget-access` nu ne les verrait jamais.
+  autres="$(cc_acces_hotes_notes)"
   if [ -n "${CORE:-}" ]; then
     sortie="$(ccp_core remote forget-access 2>&1)" || frc=$?
-  elif [ -f "$ROOT/config/remote.conf" ]; then
+    for h in $autres; do
+      f="$(ccp_core remote forget-access --host "$h" 2>&1)" || { frc=$?; sortie="${sortie}"$'\n'"$f"; }
+    done
+  elif [ -f "$ROOT/config/remote.conf" ] || [ -n "$autres" ]; then
     frc=127; sortie="noyau indisponible : les jetons de ~/.cloudflared n'ont pas pu être cherchés."
   fi
+  # Tout est effacé : plus rien à surveiller. Sur un échec, le fichier reste, pour le prochain essai.
+  [ "$frc" != 0 ] || rm -f "$ROOT/.baluchon-acces" 2>/dev/null || true
   for f in "$ROOT"/config/*; do
     [ -e "$f" ] || [ -L "$f" ] || continue
     if [ "$frc" != 0 ] && [ "${f##*/}" = remote.conf ]; then continue; fi
@@ -528,4 +540,244 @@ cc_wipe() {
   fi
   [ "$prc" = 0 ] || [ "$prc" = 2 ] || return 1
   return "$prc"
+}
+
+# ─── Un seul lien chez le client ────────────────────────────────────────────────────────────
+# Le lien d'installation (install.sh, ou l'amorce de l'atelier) doit se suffire à lui-même : installer,
+# se reconnaître déjà installé et à jour, ouvrir le menu, et permettre d'en PARTIR sans rien laisser.
+# Tout ce qui suit est partagé par install.sh, l'amorce et Claude.command, pour n'avoir qu'une
+# définition de « installé », de « à jour » et de « ce qui reste » (tests : scripts/lien-unique.test.sh
+# et scripts/depart.test.sh).
+
+# 0 si $1 (défaut : ROOT) se déclare une installation de Baluchon : marqueur ordinaire (pas un lien)
+# dont la première ligne est « baluchon-install 1 ». Même jugement que uninstall.sh, qui reste la
+# SEULE autorité pour effacer ; ici il ne sert qu'à décider quoi PROPOSER (« Partir » n'existe pas sur
+# une clé sans marqueur) et à reconnaître une installation.
+cc_est_installation() {
+  local d="${1:-$ROOT}"
+  [ -d "$d" ] && [ ! -L "$d/.baluchon-install" ] && [ -f "$d/.baluchon-install" ] \
+    && [ "$(head -n 1 "$d/.baluchon-install" 2>/dev/null)" = "baluchon-install 1" ]
+}
+
+# Étiquette INFORMATIVE de la release (« v3.0.0 » si CCP_DL en désigne une, sinon « latest »). Elle ne
+# décide de rien : l'identité d'une release est l'empreinte de son SHA256SUMS signé.
+cc_release_tag() {
+  case "$CCP_DL" in
+    */releases/download/*) printf '%s' "${CCP_DL##*/}" ;;
+    *) printf 'latest' ;;
+  esac
+}
+
+# Note, EN DERNIER (après une installation ou une mise à jour complète), quelle release est posée : le
+# fichier .baluchon-release porte l'empreinte du SHA256SUMS dont la signature vient d'être vérifiée.
+# WHY l'empreinte et non un numéro de version : aucune version à deviner, et deux releases qui diffèrent
+# d'un seul octet de n'importe quel actif ne se confondent jamais. $1 = SHA256SUMS authentifié.
+cc_release_noter() {
+  local sums="$1" h tag tmp
+  h="$(cc_sha256 "$sums")"; [ -n "$h" ] || return 1
+  tag="$(cc_release_tag | tr -c 'A-Za-z0-9._+-' '_')"
+  tmp="$ROOT/.baluchon-release.$$"
+  printf 'baluchon-release 1\nsums %s\ntag %s\n' "$h" "$tag" > "$tmp" && mv -f "$tmp" "$ROOT/.baluchon-release"
+}
+
+# Cette installation est-elle EXACTEMENT celle de la release dont $1 (SHA256SUMS authentifié) est la
+# liste ? Oui seulement si le marqueur d'installation est valide, si le relevé .baluchon-release porte
+# l'empreinte de $1, si chaque fichier posé (menu, bibliothèque, désinstalleur, noyau) a l'empreinte
+# que la release signe, et si le binaire Claude, sa version et gum sont là. Fail-closed : au moindre doute,
+# non, et l'installeur refait tout (il ne perd rien à refaire). Suppose cc_detect_platform déjà joué.
+cc_release_a_jour() {
+  local sums="$1" st="$ROOT/.baluchon-release" paire nom f want
+  cc_est_installation "$ROOT" || return 1
+  [ -f "$st" ] && [ ! -L "$st" ] && [ "$(head -n 1 "$st" 2>/dev/null)" = "baluchon-release 1" ] || return 1
+  [ "$(awk '$1=="sums"{print $2; exit}' "$st" 2>/dev/null)" = "$(cc_sha256 "$sums")" ] || return 1
+  for paire in "Claude.command:Claude.command" "common.sh:lib/common.sh" "uninstall.sh:uninstall.sh" \
+               "baluchon-core-$CORE_PLAT$EXE:bin/$CORE_PLAT/baluchon-core$EXE"; do
+    nom="${paire%%:*}"; f="$ROOT/${paire#*:}"
+    want="$(cc_sum_for "$sums" "$nom")"
+    if [ -z "$want" ]; then
+      # Une release sans désinstalleur (anciennes) n'en exige pas ; tout autre actif manquant = non.
+      [ "$nom" = uninstall.sh ] && continue
+      return 1
+    fi
+    [ -f "$f" ] && [ "$(cc_sha256 "$f")" = "$want" ] || return 1
+  done
+  # Le binaire Claude, sa version et l'interface (sans gum, le menu n'existe pas : mieux vaut retenter).
+  [ -f "$ROOT/bin/$PLAT/$BINNAME" ] && [ -s "$ROOT/VERSION" ] && [ -f "$ROOT/tools/gum/$PLAT/gum$EXE" ]
+}
+
+# Nom d'hôte DNS sûr (même règle que le noyau : jamais de tiret ni de point en tête, rien hors
+# lettres, chiffres, point, tiret).
+cc_hote_valide() {
+  case "$1" in ''|-*|.*|*.|*..*|*[!A-Za-z0-9.-]*) return 1 ;; esac
+  [ "${#1}" -le 253 ]
+}
+
+# Hôtes dont l'AMORCE a signalé que des jetons Cloudflare Access ont pu rester (fichier .baluchon-acces :
+# un nom d'hôte par ligne, jamais un jeton). Ils ne sont pas dans config/remote.conf, donc le
+# `forget-access` sans argument ne les verrait jamais. Un nom invalide est ignoré.
+cc_acces_hotes_notes() {
+  local f="$ROOT/.baluchon-acces" h
+  [ -f "$f" ] && [ ! -L "$f" ] || return 0
+  while IFS= read -r h || [ -n "$h" ]; do
+    h="${h%$'\r'}"
+    if cc_hote_valide "$h"; then printf '%s\n' "$h"; fi
+  done < "$f" | sort -u
+}
+
+# Tous les hôtes d'accès connus de ce portable : celui de config/remote.conf (même syntaxe que le noyau :
+# « host = valeur », guillemets facultatifs) et ceux de .baluchon-acces. Un par ligne, sans doublon.
+cc_acces_hotes() {
+  local f="$ROOT/config/remote.conf" l k v
+  {
+    if [ -f "$f" ]; then
+      while IFS= read -r l || [ -n "$l" ]; do
+        l="${l%$'\r'}"
+        case "$l" in \#*) continue ;; *=*) ;; *) continue ;; esac
+        k="${l%%=*}"; v="${l#*=}"
+        k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+        [ "$k" = host ] || continue
+        v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+        case "$v" in \"*\") v="${v#\"}"; v="${v%\"}" ;; \'*\') v="${v#\'}"; v="${v%\'}" ;; esac
+        if cc_hote_valide "$v"; then printf '%s\n' "$v"; fi
+      done < "$f"
+    fi
+    cc_acces_hotes_notes
+  } | sort -u
+}
+
+# La commande à taper pour rouvrir le menu : « baluchon » si ~/.local/bin est dans le PATH, sinon son
+# chemin complet, sinon celui du menu lui-même. $1 = chemin de Claude.command.
+cc_commande_menu() {
+  local b="$HOME/.local/bin/baluchon"
+  [ -x "$b" ] || { printf '%s' "$1"; return 0; }
+  case ":$PATH:" in *":$HOME/.local/bin:"*) printf 'baluchon' ;; *) printf '%s' "$b" ;; esac
+}
+
+# Ouvre le menu depuis le lien d'installation. $1 = chemin de Claude.command. Rend le code de sortie du
+# menu (0 : fermé normalement ; autre : « Partir » incomplet, voir cc_depart), ou 0 sans terminal.
+# WHY un ENFANT et non `exec` : l'appelant a des nettoyages à faire quand le menu se ferme (l'amorce
+# efface ses jetons Access et son dossier de travail). WHY /dev/tty : avec `curl … | bash`, l'entrée
+# standard est le script lui-même ; le menu doit lire le clavier. Sans terminal (cron, SSH sans -t,
+# agent), il n'y a rien à ouvrir : on dit la commande à taper, et ce n'est pas une erreur.
+# CC_TTY remplace /dev/tty (essais : un fichier).
+cc_open_menu() {
+  local cmd="$1" tty="${CC_TTY:-/dev/tty}" rc=0
+  [ -x "$cmd" ] || { cc_warn "Menu introuvable ($cmd)."; return 1; }
+  if [ -r "$tty" ] && [ -w "$tty" ] && ( : < "$tty" ) 2>/dev/null; then
+    # shellcheck disable=SC2094  # le terminal est lu ET écrit : c'est le but
+    BALUCHON_DEPUIS_LIEN=1 "$cmd" < "$tty" >> "$tty" 2>&1 || rc=$?
+    return "$rc"
+  fi
+  cc_info "Pas de terminal ici pour ouvrir le menu. Pour l'ouvrir, tape :  $(cc_commande_menu "$cmd")"
+  return 0
+}
+
+# ── Partir : tout effacer et désinstaller ──────────────────────────────────────────────────
+# Relevé de ce qu'il faudra chercher, fait AVANT d'effacer : une fois le dossier parti, plus rien ne dit
+# quel item du Trousseau ni quel hôte regarder. Pose CC_DEP_DIRS (le chemin du dossier tel que le menu le
+# connaît, et son chemin canonique s'il diffère : un lien mène au même dossier), CC_DEP_SERVICES (items
+# Trousseau macOS : un par config/<profil>, pour chacun des deux chemins, puisque Claude suffixe le nom du
+# service d'après le chemin qu'on lui donne) et CC_DEP_HOTES. Une valeur par ligne.
+cc_depart_releve() {
+  local real d cfg base
+  CC_DEP_DIRS="$ROOT"
+  real="$(cd -P -- "$ROOT" 2>/dev/null && pwd -P)"
+  if [ -n "$real" ] && [ "$real" != "$ROOT" ]; then CC_DEP_DIRS="$CC_DEP_DIRS"$'\n'"$real"; fi
+  CC_DEP_SERVICES=""
+  if [ "${CC_OS:-}" = darwin ]; then
+    for d in "$ROOT"/config/*/; do
+      [ -d "$d" ] || continue
+      cfg="${d%/}"; base="${cfg##*/}"
+      CC_DEP_SERVICES="$CC_DEP_SERVICES"$'\n'"Claude Code-credentials-$(printf '%s' "$cfg" | shasum -a 256 | cut -c1-8)"
+      if [ -n "$real" ] && [ "$real" != "$ROOT" ]; then
+        CC_DEP_SERVICES="$CC_DEP_SERVICES"$'\n'"Claude Code-credentials-$(printf '%s' "$real/config/$base" | shasum -a 256 | cut -c1-8)"
+      fi
+    done
+  fi
+  CC_DEP_HOTES="$(cc_acces_hotes)"
+}
+
+# Relit le DISQUE (jamais le code retour d'un effacement) et dit ce qui reste de ce que cc_depart_releve
+# a relevé : le dossier, les commandes de ~/.local/bin qui y mènent, les items du Trousseau, les jetons
+# Cloudflare Access (seulement si un hôte était connu : sans hôte, rien ne dit qu'il y en a). Écrit
+# CC_DEPART_RESTE (une ligne par reste) ; rend 0 si rien ne reste, 1 sinon. N'écrit nulle part : un
+# journal recréé ici serait lui-même un reste.
+cc_depart_verifie() {
+  local p n f s h nom re lignes="" cf="$HOME/.cloudflared" nl=$'\n'
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if [ -e "$p" ] || [ -L "$p" ]; then lignes="${lignes}Le dossier $p est encore là.$nl"; fi
+  done <<< "$CC_DEP_DIRS"
+  for n in baluchon baluchon1 ccp ccp1; do
+    f="$HOME/.local/bin/$n"
+    { [ -f "$f" ] || [ -L "$f" ]; } || continue
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      if grep -qF "$p/Claude.command" "$f" 2>/dev/null; then lignes="${lignes}La commande $f lance encore Baluchon.$nl"; break; fi
+    done <<< "$CC_DEP_DIRS"
+  done
+  if [ "${CC_OS:-}" = darwin ] && command -v security >/dev/null 2>&1; then
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
+      if security find-generic-password -s "$s" >/dev/null 2>&1; then lignes="${lignes}Trousseau : l'item « $s » est encore là.$nl"; fi
+    done <<< "$CC_DEP_SERVICES"
+  fi
+  if [ -n "$CC_DEP_HOTES" ] && [ -d "$cf" ]; then
+    for f in "$cf"/*; do
+      { [ -e "$f" ] || [ -L "$f" ]; } || continue
+      nom="${f##*/}"
+      if [[ "$nom" =~ ^[A-Za-z0-9-]+[.]cloudflareaccess[.]com-org-token([.]lock)?$ ]]; then
+        lignes="${lignes}Jeton Cloudflare Access : $cf/$nom est encore là.$nl"; continue
+      fi
+      while IFS= read -r h; do
+        [ -n "$h" ] || continue
+        re="^${h//./[.]}-[0-9a-fA-F]{32,}-token([.]lock)?\$"
+        if [[ "$nom" =~ $re ]]; then lignes="${lignes}Jeton Cloudflare Access : $cf/$nom est encore là.$nl"; break; fi
+      done <<< "$CC_DEP_HOTES"
+    done
+  fi
+  CC_DEPART_RESTE="$lignes"
+  [ -z "$lignes" ]
+}
+
+# Efface tout ce que Baluchon a posé sur cet ordinateur : sessions et jetons (cc_wipe), puis le dossier et
+# les commandes (uninstall.sh, l'UNIQUE endroit où vivent les gardes du chemin à effacer : marqueur,
+# domicile, ancêtres, identité du dossier). On l'exécute depuis une COPIE vérifiée (cmp + bash -n) dans un
+# dossier privé : le dossier qu'on efface contient le script, et un script bash lu pendant qu'on supprime
+# son fichier est un piège. Sans interface, sans question : la confirmation est celle du menu.
+# Code de sortie (le détail de ce qui reste est dans CC_DEPART_RESTE et CC_DEPART_NOTE) :
+#   0 = rien ne reste, relu sur le disque ; 14 = rien n'a été fait (désinstalleur absent ou altéré) ;
+#   2, 10, 11, 12 = codes d'uninstall.sh (refusé, jetons Access, purge incomplète, dossier non supprimé) ;
+#   2 aussi si cc_wipe a vu une session Claude encore ouverte ; 1, 10 = codes de cc_wipe quand le
+#   désinstalleur n'a pas pu les corriger ; 13 = il reste quelque chose que personne n'avait signalé.
+# AUCUN cc_log ici ni après : il recréerait ROOT/logs dans le dossier qu'on vient d'effacer.
+cc_depart() {
+  local un="$ROOT/uninstall.sh" tmpd copie wrc=0 urc=0 code=0 reste=0
+  CC_DEPART_NOTE=""; CC_DEPART_RESTE=""
+  cc_est_installation "$ROOT" && [ -f "$un" ] && [ ! -L "$un" ] \
+    || { CC_DEPART_NOTE="Le désinstalleur ($un) est absent : rien n'a été effacé."; return 14; }
+  tmpd="$(mktemp -d)" || { CC_DEPART_NOTE="Dossier temporaire impossible : rien n'a été effacé."; return 14; }
+  chmod 700 "$tmpd"
+  copie="$tmpd/uninstall.sh"
+  if ! { cp "$un" "$copie" && cmp -s "$un" "$copie" && bash -n "$copie" 2>/dev/null; }; then
+    rm -rf "$tmpd"
+    CC_DEPART_NOTE="Le désinstalleur n'a pas pu être copié intact : rien n'a été effacé."; return 14
+  fi
+  cc_depart_releve
+  cc_wipe || wrc=$?
+  CC_DEPART_NOTE="${CC_WIPE_NOTE:-}"
+  # Le dossier courant ne doit pas être celui qu'on supprime.
+  cd / 2>/dev/null || true
+  BALUCHON_DIR="$ROOT" bash "$copie" --oui < /dev/null > /dev/null || urc=$?
+  rm -rf "$tmpd"
+  # Le disque relu fait foi : le désinstalleur refait lui-même la purge et l'oubli des jetons, donc un
+  # échec de cc_wipe suivi d'une désinstallation complète n'est plus un échec. Ce que le disque ne voit
+  # pas (une session Claude encore ouverte, qui peut réécrire ses identifiants) vient des codes 2 et 11.
+  cc_depart_verifie || reste=1
+  if [ "$urc" != 0 ]; then code="$urc"
+  elif [ "$reste" = 1 ]; then
+    case "$wrc" in 1|10) code="$wrc" ;; *) code=13 ;; esac
+  elif [ "$wrc" = 2 ]; then code=2
+  fi
+  return "$code"
 }

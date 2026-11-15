@@ -198,6 +198,7 @@ defaut_arbre() { # defaut_arbre <nom> : tous les fichiers de la liste publique, 
   pub_arbre "$1"
   local plat exe
   printf 'x\n' > "$T/Claude.command"; printf 'x\n' > "$T/claude.cmd"; printf 'x\n' > "$T/claude-classic.cmd"
+  printf 'x\n' > "$T/uninstall.sh"
   for plat in darwin-arm64 darwin-x64 linux-x64 linux-arm64 win32-x64; do
     exe=""; [ "$plat" = win32-x64 ] && exe=.exe
     mkdir -p "$T/dist/$plat"; printf 'binaire factice\n' > "$T/dist/$plat/baluchon-core$exe"
@@ -208,6 +209,10 @@ expect "liste par défaut (CCP_ASSETS vide) : release complète" 0 rel "$T" CCP_
 grep -q ' install\.sh$' "$T/sortie/SHA256SUMS" && grep -q ' install\.ps1$' "$T/sortie/SHA256SUMS" \
   && verdict vrai "…install.sh et install.ps1 figurent dans SHA256SUMS (actifs signés)" \
   || verdict faux "…install.sh et install.ps1 figurent dans SHA256SUMS (actifs signés)" "$(cat "$T/sortie/SHA256SUMS" 2>&1)"
+# Le désinstalleur est un actif signé : l'entrée « Partir » du menu l'exécute depuis l'installation.
+grep -q ' uninstall\.sh$' "$T/sortie/SHA256SUMS" \
+  && verdict vrai "…uninstall.sh figure dans SHA256SUMS (actif signé, exécuté par « Partir »)" \
+  || verdict faux "…uninstall.sh figure dans SHA256SUMS (actif signé, exécuté par « Partir »)" "$(cat "$T/sortie/SHA256SUMS" 2>&1)"
 defaut_arbre defaut-contamine
 printf '%s\n' "$ECRIT" > "$T/dist/linux-x64/baluchon-core"
 expect "liste par défaut dont un binaire sait écrire" 1 rel "$T" CCP_SIGNER_ID=baluchon-release CCP_ASSETS=
