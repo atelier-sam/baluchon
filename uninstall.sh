@@ -317,38 +317,113 @@ fi
 
 # Les copies d'exécution (revue Codex : le bilan oubliait le cache) : sur une clé montée sans exécution, le
 # portable copie ses binaires sous ${XDG_CACHE_HOME:-~/.cache}/baluchon et en note les dossiers dans
-# .baluchon-cache. On retire SEULEMENT ceux-là, avec des bornes : strictement sous la base, sans « .. » ni « // »,
-# aucun composant qui soit un lien, un vrai dossier, à toi. Une ligne qui ne tient pas ces bornes n'est jamais
-# suivie : elle est dite. Les dossiers parents devenus vides sont retirés avec, jamais un parent non vide.
-CACHE_BASE="${XDG_CACHE_HOME:-$HOME/.cache}/baluchon"
-sans_lien() { # sans_lien <chemin sous CACHE_BASE> : aucun composant, de la base au chemin, n'est un lien
-  local cur="$CACHE_BASE" reste="${1#"$CACHE_BASE"/}" part
-  [ ! -L "$cur" ] || return 1
-  while [ -n "$reste" ]; do
-    part="${reste%%/*}"; cur="$cur/$part"
-    [ ! -L "$cur" ] || return 1
-    case "$reste" in */*) reste="${reste#*/}" ;; *) reste="" ;; esac
-  done
+# .baluchon-cache (un chemin par ligne, plus UNE ligne « base <cache>/baluchon » la première fois qu'une base
+# sert). WHY ces lignes « base » (revue Codex, 4e passe, constat 8) : XDG_CACHE_HOME peut changer entre deux
+# lancements ; juger les entrées selon sa valeur du JOUR laissait sur le disque, sans le dire, les copies rangées
+# sous l'ancienne. Les lignes « base » sont ignorées comme chemins par les lecteurs d'avant (elles ne sont pas
+# absolues). On retire SEULEMENT ces dossiers :
+#   - bases acceptées : ~/.cache/baluchon, celle de XDG_CACHE_HOME ACTUEL, et celles que .baluchon-cache
+#     enregistre ; chacune absolue, sans « .. » ni « // », terminée par /baluchon, de parent autre que « / »,
+#     jamais un lien ;
+#   - une entrée est strictement SOUS une base acceptée (la plus courte qui la contient) ;
+#   - de la base à l'entrée comprise, chaque dossier est un vrai dossier (jamais un lien), à toi, que ni les
+#     autres ni (hors compte privé du même nom que toi) le groupe ne peuvent modifier : le sticky bit n'y
+#     dispense de rien. Au-dessus de la base, chaque ancêtre du chemin PHYSIQUE passe ancetre_sur ;
+#   - la suppression ne repasse jamais par le chemin absolu : `cd -P` chaîné dossier par dossier depuis la base
+#     (chaque pas revérifié sur le dossier où l'on est ENTRÉ : ni lien, ni propriétaire, ni droits d'écriture,
+#     chemin physique attendu), puis `rm -rf -- ./feuille` et remontée par `rmdir -- ./nom` relatifs.
+# Limite dite : en bash la garantie complète (openat / unlinkat) n'existe pas ; ce qui est fermé, c'est le
+# remplacement d'un composant par un lien ET l'écriture par un autre compte dans l'un d'eux.
+# Une ligne qui ne tient pas ces bornes n'est jamais suivie. Les dossiers parents devenus vides sont retirés avec,
+# jamais un parent non vide.
+cache_base_ok() { # cache_base_ok <chemin> : forme acceptable pour une base (un lien est refusé par efface_cache, et dit)
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$1" in *..*|*//*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  case "$1" in */baluchon) ;; *) return 1 ;; esac
+  [ -n "${1%/baluchon}" ]
+}
+cache_dossier_sur() { # cache_dossier_sur <dossier> : un vrai dossier à toi que les autres ne modifient pas
+  local ligne mode uid gid
+  { [ ! -L "$1" ] && [ -d "$1" ]; } || return 1
+  ligne="$(ls -ldn -- "$1" 2>/dev/null)" || return 1
+  read -r mode _ uid gid _ <<< "$ligne"
+  [ "$uid" = "$(id -u)" ] || return 1
+  case "${mode:8:1}" in w) return 1 ;; esac
+  # Écriture du groupe : refusée, sauf dans le cas d'un groupe privé de même nom que toi (umask 002 de Debian et
+  # d'Ubuntu : tout ce que tu crées l'est), dont tu es le seul membre par construction.
+  case "${mode:5:1}" in
+    w) { [ "$gid" = "$(id -g)" ] && [ "$(id -gn)" = "$(id -un)" ]; } || return 1 ;;
+  esac
+  return 0
+}
+efface_cache() { # efface_cache <base> <entrée sous la base> : 0 effacée, 3 refusée (rien de supprimé), 4 non supprimée en entier
+  local b="$1" rel="${2#"$1"/}"
+  (
+    [ ! -L "$b" ] || exit 3
+    cd -P -- "$b" 2>/dev/null || exit 3
+    bp="$(pwd -P)"
+    cache_dossier_sur . || exit 3
+    p="$bp"
+    while [ "$p" != / ]; do
+      p="$(dirname -- "$p")"
+      ancetre_sur "$p" || exit 3
+    done
+    noms=(); cur="$bp"; reste="$rel"
+    while [ -n "$reste" ]; do
+      part="${reste%%/*}"
+      case "$reste" in */*) reste="${reste#*/}" ;; *) reste="" ;; esac
+      case "$part" in ''|.|..) exit 3 ;; esac
+      { [ -d "./$part" ] && [ ! -L "./$part" ]; } || exit 3
+      cd -P -- "./$part" 2>/dev/null || exit 3
+      cur="$cur/$part"
+      [ "$(pwd -P)" = "$cur" ] || exit 3
+      cache_dossier_sur . || exit 3
+      noms[${#noms[@]}]="$part"
+    done
+    n=${#noms[@]}
+    [ "$n" -ge 1 ] || exit 3
+    feuille="${noms[$((n - 1))]}"
+    id_feuille="$(identite .)" || exit 3
+    cd -P -- .. 2>/dev/null || exit 3
+    [ "$(pwd -P)" = "${cur%/*}" ] || exit 3
+    { [ -d "./$feuille" ] && [ ! -L "./$feuille" ] && [ "$(identite "./$feuille")" = "$id_feuille" ]; } || exit 3
+    rm -rf -- "./$feuille" 2>/dev/null
+    if [ -e "./$feuille" ] || [ -L "./$feuille" ]; then exit 4; fi
+    i=$((n - 1))
+    while [ "$i" -ge 1 ]; do
+      nom="${noms[$((i - 1))]}"
+      cd -P -- .. 2>/dev/null || exit 0
+      rmdir -- "./$nom" 2>/dev/null || exit 0
+      i=$((i - 1))
+    done
+    if cd -P -- .. 2>/dev/null; then rmdir -- "./${bp##*/}" 2>/dev/null || true; fi
+    exit 0
+  )
 }
 if [ -f "$DIR/.baluchon-cache" ] && [ ! -L "$DIR/.baluchon-cache" ]; then
   verifie_ou_refuse
+  BASES_CACHE=("$HOME/.cache/baluchon" "${XDG_CACHE_HOME:-$HOME/.cache}/baluchon")
   while IFS= read -r c || [ -n "$c" ]; do
     c="${c%$'\r'}"
-    case "$c" in "$CACHE_BASE"/?*) ;; *) continue ;; esac
+    case "$c" in "base /"*) BASES_CACHE[${#BASES_CACHE[@]}]="${c#base }" ;; esac
+  done < "$DIR/.baluchon-cache"
+  while IFS= read -r c || [ -n "$c" ]; do
+    c="${c%$'\r'}"
+    case "$c" in /*) ;; *) continue ;; esac
     case "$c" in *..*|*//*) continue ;; esac
-    { [ -e "$c" ] || [ -L "$c" ]; } || continue
-    if ! sans_lien "$c" || [ ! -d "$c" ] || [ -z "$(find "$c" -maxdepth 0 -user "$(id -u)" 2>/dev/null)" ]; then
-      incomplet 12 "Cache d'exécution NON effacé (lien, pas un dossier, ou pas à toi) : $c"
-      continue
-    fi
-    rm -rf -- "$c" 2>/dev/null
-    if [ -e "$c" ]; then incomplet 12 "Cache d'exécution non supprimé en entier : $c"; continue; fi
-    p="$(dirname -- "$c")"
-    while [ "$p" != "$CACHE_BASE" ] && [ "${p#"$CACHE_BASE"/}" != "$p" ]; do
-      rmdir "$p" 2>/dev/null || break
-      p="$(dirname -- "$p")"
+    b=""
+    for cand in "${BASES_CACHE[@]}"; do
+      cache_base_ok "$cand" || continue
+      case "$c" in "$cand"/?*) if [ -z "$b" ] || [ "${#cand}" -lt "${#b}" ]; then b="$cand"; fi ;; esac
     done
-    rmdir "$CACHE_BASE" 2>/dev/null || true
+    [ -n "$b" ] || continue
+    { [ -e "$c" ] || [ -L "$c" ]; } || continue
+    efface_cache "$b" "$c"; rc_cache=$?
+    case "$rc_cache" in
+      0) ;;
+      3) incomplet 12 "Cache d'exécution NON effacé (lien, pas un dossier, pas à toi, ou un dossier du chemin que d'autres peuvent modifier) : $c" ;;
+      *) incomplet 12 "Cache d'exécution non supprimé en entier : $c" ;;
+    esac
   done < "$DIR/.baluchon-cache"
 fi
 

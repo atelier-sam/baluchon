@@ -551,6 +551,34 @@ if [ -s "${AN:-/inexistant}/common.sh" ]; then
   dit "15. …ET disait « Rien ne reste »" "Rien ne reste"
 fi
 
+# ── 15b. (revue Codex, 4e passe, constat 8) XDG_CACHE_HOME a changé depuis le rangement des copies ──────
+# cc_cache_noter enregistre, UNE fois, la base où il range (ligne « base » de .baluchon-cache) ; « Partir » retrouve
+# alors les copies de l'ancienne base, retire ce qu'il peut, et le bilan relit le disque. Un « Partir » d'avant ne
+# connaissait que la valeur du JOUR de XDG_CACHE_HOME : il laissait ces copies et disait « Rien ne reste ».
+monde cache-xdg
+XD="$T/xdg-ancien"; mkdir -p "$XD/baluchon/9.9.9/$PLAT"; printf 'copie\n' > "$XD/baluchon/9.9.9/$PLAT/claude"
+env -i HOME="$H" PATH="/usr/bin:/bin" XDG_CACHE_HOME="$XD" bash -c 'ROOT="$1"; . "$ROOT/lib/common.sh"; cc_detect_platform
+  cc_cache_noter "$XDG_CACHE_HOME/baluchon/9.9.9/$2"; cc_cache_noter "$XDG_CACHE_HOME/baluchon/9.9.9/$2"' _ "$R" "$PLAT" >/dev/null 2>&1
+egal "15b. cc_cache_noter : la base est enregistrée UNE fois (idempotent), l'entrée après elle" \
+  "base $XD/baluchon|$XD/baluchon/9.9.9/$PLAT" "$(paste -sd'|' "$R/.baluchon-cache" 2>/dev/null)"
+egal "15b. …et cc_cache_liste, SANS XDG_CACHE_HOME, retrouve la copie de l'ancienne base" "$XD/baluchon/9.9.9/$PLAT" \
+  "$(env -i HOME="$H" PATH="/usr/bin:/bin" bash -c 'ROOT="$1"; . "$ROOT/lib/common.sh"; cc_cache_liste' _ "$R" 2>/dev/null)"
+choix Partir; printf '0\n' > "$CTL/confirm-rc"
+joue
+egal "15b. « Partir » sous une autre valeur de XDG_CACHE_HOME : code 0" 0 "$RC"
+vrai_si "15b. …la copie de l'ancienne base est retirée" test ! -e "$XD/baluchon"
+dit "15b. …et le bilan dit « Rien ne reste »" "Rien ne reste"
+# Contrôle positif : le MÊME fichier .baluchon-cache lu par l'ANCIEN « Partir » (qui ignore la ligne « base »).
+if [ -s "${AN:-/inexistant}/common.sh" ]; then
+  MONDE_LIB="$AN/common.sh" MONDE_UN="$AN/uninstall.sh" monde cache-xdg-ancien "$AN/Claude.command"
+  XD="$T/xdg-ancien"; mkdir -p "$XD/baluchon/9.9.9/$PLAT"; printf 'copie\n' > "$XD/baluchon/9.9.9/$PLAT/claude"
+  { printf 'base %s\n' "$XD/baluchon"; printf '%s\n' "$XD/baluchon/9.9.9/$PLAT"; } > "$R/.baluchon-cache"
+  choix Partir; printf '0\n' > "$CTL/confirm-rc"
+  joue
+  vrai_si "15b. CONTRÔLE POSITIF : l'ancien « Partir » laissait la copie de l'ancienne base…" test -e "$XD/baluchon/9.9.9/$PLAT/claude"
+  dit "15b. …ET disait « Rien ne reste »" "Rien ne reste"
+fi
+
 # ── 13. Contrôle positif : l'ANCIEN menu ne propose pas « Partir » (l'épreuve 1 y échouerait) ──
 ANCIEN="$BASE/Claude.command.ancien"
 if git -C "$DEPOT" show c0172f7:Claude.command > "$ANCIEN" 2>/dev/null && [ -s "$ANCIEN" ]; then

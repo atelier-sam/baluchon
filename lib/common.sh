@@ -284,14 +284,27 @@ cc_download_binary() {
 }
 
 # Note, pour « Partir », un dossier de copies d'exécution créé par cc_runnable : ROOT/.baluchon-cache en
-# garde la liste (un chemin absolu par ligne, sans doublon). Sans effet hors installation.
+# garde la liste (un chemin absolu par ligne, sans doublon), précédée, la première fois qu'une base sert, d'une
+# ligne « base <cache>/baluchon ». WHY (revue Codex, 4e passe, constat 8) : XDG_CACHE_HOME peut changer entre
+# deux lancements ; « Partir » jugeait les entrées selon sa valeur du JOUR et laissait, sans le dire, les copies
+# rangées sous l'ancienne. Une ligne « base » n'est pas un chemin absolu : les lecteurs d'avant l'ignorent.
+# Sans effet hors installation.
 cc_cache_noter() {
-  local f="$ROOT/.baluchon-cache"
+  local f="$ROOT/.baluchon-cache" base ne=0 nb=0
   cc_strict || return 0
   [ ! -L "$f" ] || return 0
-  if [ -f "$f" ] && grep -qxF -- "$1" "$f" 2>/dev/null; then return 0; fi
+  base="$(cc_cache_base)"
+  if [ -f "$f" ]; then
+    if grep -qxF -- "$1" "$f" 2>/dev/null; then ne=1; fi
+    if grep -qxF -- "base $base" "$f" 2>/dev/null; then nb=1; fi
+  fi
+  if [ "$ne$nb" = 11 ]; then return 0; fi
   # Ajout par réécriture atomique (jamais un `>>` sur un nom que quelqu'un a pu lier ailleurs).
-  { if [ -f "$f" ]; then cat "$f"; fi; printf '%s\n' "$1"; } 2>/dev/null | cc_ecrire "$f" || true
+  {
+    if [ -f "$f" ]; then cat "$f"; fi
+    if [ "$nb" = 0 ]; then printf 'base %s\n' "$base"; fi
+    if [ "$ne" = 0 ]; then printf '%s\n' "$1"; fi
+  } 2>/dev/null | cc_ecrire "$f" || true
 }
 
 # Rend exécutable un binaire du portable ; sur une clé exFAT montée noexec,
@@ -1070,18 +1083,49 @@ cc_open_menu() {
 # Base des copies d'exécution que cc_runnable range quand la clé est montée sans exécution.
 cc_cache_base() { printf '%s' "${XDG_CACHE_HOME:-$HOME/.cache}/baluchon"; }
 
+# Une base de cache est acceptable si elle est absolue, sans « .. » ni « // » ni retour chariot, terminée par
+# /baluchon, de parent autre que « / ». (Un lien à cet endroit est refusé, et dit, par uninstall.sh ; il reste
+# listé ici pour que le bilan ne dise jamais « Rien ne reste » devant lui. uninstall.sh refait la même vérification
+# de forme, il est autonome : cache_base_ok.)
+cc_cache_base_ok() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$1" in *..*|*//*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  case "$1" in */baluchon) ;; *) return 1 ;; esac
+  [ -n "${1%/baluchon}" ]
+}
+
+# Bases où cette installation a pu ranger des copies, une par ligne : ~/.cache/baluchon, celle de la valeur
+# ACTUELLE de XDG_CACHE_HOME, et celles que .baluchon-cache enregistre (lignes « base <chemin> »), acceptables
+# seulement (cc_cache_base_ok).
+cc_cache_bases() {
+  local f="$ROOT/.baluchon-cache" b l
+  for b in "$HOME/.cache/baluchon" "$(cc_cache_base)"; do
+    if cc_cache_base_ok "$b"; then printf '%s\n' "$b"; fi
+  done
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    while IFS= read -r l || [ -n "$l" ]; do
+      l="${l%$'\r'}"
+      case "$l" in "base /"*) b="${l#base }"; if cc_cache_base_ok "$b"; then printf '%s\n' "$b"; fi ;; esac
+    done < "$f"
+  fi
+}
+
 # Dossiers de cache que CETTE installation a notés (.baluchon-cache), un par ligne, retenus seulement s'ils sont
-# sûrs : absolus, strictement SOUS la base, sans « .. » ni retour chariot. Une ligne douteuse est ignorée,
-# jamais suivie : ce fichier est écrit avec les droits de l'utilisateur et ne doit pas pouvoir désigner
-# ~/Documents. (uninstall.sh refait la même vérification, il est autonome.)
+# sûrs : absolus, strictement SOUS une base acceptée (cc_cache_bases), sans « .. », « // » ni retour chariot.
+# Une ligne douteuse est ignorée, jamais suivie : ce fichier est écrit avec les droits de l'utilisateur et ne
+# doit pas pouvoir désigner ~/Documents. (uninstall.sh refait la même vérification, il est autonome.)
 cc_cache_liste() {
-  local f="$ROOT/.baluchon-cache" base p
+  local f="$ROOT/.baluchon-cache" bases b p
   [ -f "$f" ] && [ ! -L "$f" ] || return 0
-  base="$(cc_cache_base)"
+  bases="$(cc_cache_bases)"
   while IFS= read -r p || [ -n "$p" ]; do
-    case "$p" in "$base"/?*) ;; *) continue ;; esac
-    case "$p" in *..*|*$'\r'*) continue ;; esac
-    printf '%s\n' "$p"
+    p="${p%$'\r'}"
+    case "$p" in /*) ;; *) continue ;; esac
+    case "$p" in *..*|*//*) continue ;; esac
+    while IFS= read -r b; do
+      [ -n "$b" ] || continue
+      case "$p" in "$b"/?*) printf '%s\n' "$p"; break ;; esac
+    done <<< "$bases"
   done < "$f"
 }
 

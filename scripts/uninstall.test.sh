@@ -610,6 +610,86 @@ if [ "$A_ANCIEN" = 1 ]; then
     || verdict faux "CONTRÔLE POSITIF : l'ancien script aurait dû laisser le cache" "$LAST_RC $LAST_OUT"
 fi
 
+# 11d. (revue Codex, 4e passe, HIGH 4) Les ANCÊTRES de la copie à supprimer. Le script jugeait `sans_lien` (aucun lien)
+# puis faisait `rm -rf -- <chemin absolu>` : un dossier du chemin que d'autres peuvent modifier, ou remplacé par un
+# lien entre le contrôle et la suppression, redirigeait le `rm`. Attendu : chaque dossier de la base à la copie est
+# un vrai dossier à toi, que ni les autres ni le groupe ne modifient (le sticky bit n'y dispense de rien), et la
+# suppression se fait par des noms RELATIFS depuis un `cd -P` chaîné (un `rm` instrumenté le prouve).
+# Les épreuves a et b se rejouent contre un script d'avant (UN_A_EPROUVER=<af1d389:uninstall.sh>) : elles y échouent.
+cache_pose() { # cache_pose : ~/.cache/baluchon/9.9.9/plat/claude, droits ordinaires
+  mkdir -p "$H/.cache/baluchon/9.9.9/plat"; printf 'copie\n' > "$H/.cache/baluchon/9.9.9/plat/claude"
+}
+cache_vide() { # cache_vide : remet ~/.cache/baluchon à zéro entre deux épreuves (droits rendus avant)
+  chmod -R u+rwx,go-w "$H/.cache/baluchon" 2>/dev/null || true
+  rm -rf -- "$H/.cache/baluchon"
+}
+if [ "$(id -gn)" != "$(id -un)" ]; then   # groupe privé de même nom (umask 002 de Debian/Ubuntu) : le groupe est toléré
+  I="$BASE/cache-ancetre-groupe"; faire_install "$I"; cache_pose
+  chmod g+w "$H/.cache/baluchon/9.9.9"
+  printf '%s\n' "$H/.cache/baluchon/9.9.9/plat" > "$I/.baluchon-cache"
+  lancer "$I"
+  [ "$LAST_RC" -eq 12 ] && verdict vrai "11d-a. un dossier du chemin modifiable par le GROUPE : code 12" || verdict faux "11d-a. ancêtre modifiable par le groupe : code 12" "$LAST_RC $LAST_OUT"
+  [ "$(cat "$H/.cache/baluchon/9.9.9/plat/claude" 2>/dev/null)" = copie ] && verdict vrai "11d-a. …rien n'est supprimé" || verdict faux "11d-a. …rien n'est supprimé"
+  case "$LAST_OUT" in *"Cache d'exécution NON effacé"*) verdict vrai "11d-a. …le cache restant est NOMMÉ" ;; *) verdict faux "11d-a. …le cache restant est NOMMÉ" "$LAST_OUT" ;; esac
+  case "$LAST_OUT" in *"Plus aucune trace"*) verdict faux "11d-a. …jamais « Plus aucune trace »" "$LAST_OUT" ;; *) verdict vrai "11d-a. …jamais « Plus aucune trace »" ;; esac
+  cache_vide
+else
+  echo "(!) groupe privé de même nom que l'utilisateur : l'épreuve « écriture du groupe » est sautée"
+fi
+I="$BASE/cache-ancetre-sticky"; faire_install "$I"; cache_pose
+chmod 1777 "$H/.cache/baluchon/9.9.9"
+printf '%s\n' "$H/.cache/baluchon/9.9.9/plat" > "$I/.baluchon-cache"
+lancer "$I"
+[ "$LAST_RC" -eq 12 ] && verdict vrai "11d-b. un dossier du chemin modifiable par TOUS (1777, sticky non exempté) : code 12" || verdict faux "11d-b. 1777 : code 12" "$LAST_RC $LAST_OUT"
+[ "$(cat "$H/.cache/baluchon/9.9.9/plat/claude" 2>/dev/null)" = copie ] && verdict vrai "11d-b. …rien n'est supprimé" || verdict faux "11d-b. …rien n'est supprimé"
+cache_vide
+I="$BASE/cache-ancetre-lien"; faire_install "$I"
+mkdir -p "$BASE/cache-ailleurs/plat"; printf 'precieux\n' > "$BASE/cache-ailleurs/plat/claude"
+mkdir -p "$H/.cache/baluchon"; ln -s "$BASE/cache-ailleurs" "$H/.cache/baluchon/9.9.9"
+printf '%s\n' "$H/.cache/baluchon/9.9.9/plat" > "$I/.baluchon-cache"
+lancer "$I"
+[ "$LAST_RC" -eq 12 ] && verdict vrai "11d-c. un dossier INTERMÉDIAIRE qui est un lien : code 12" || verdict faux "11d-c. composant lien : code 12" "$LAST_RC $LAST_OUT"
+[ "$(cat "$BASE/cache-ailleurs/plat/claude" 2>/dev/null)" = precieux ] && verdict vrai "11d-c. …ce que le lien désigne est INTACT" || verdict faux "11d-c. …ce que le lien désigne est INTACT"
+rm -f "$H/.cache/baluchon/9.9.9"   # un lien : ce `rm` ne suit rien
+cache_vide
+I="$BASE/cache-base-lien"; faire_install "$I"
+mkdir -p "$BASE/cache-ailleurs2/9.9.9/plat"; printf 'precieux\n' > "$BASE/cache-ailleurs2/9.9.9/plat/claude"
+mkdir -p "$H/.cache"; ln -s "$BASE/cache-ailleurs2" "$H/.cache/baluchon"
+printf '%s\n' "$H/.cache/baluchon/9.9.9/plat" > "$I/.baluchon-cache"
+lancer "$I"
+[ "$LAST_RC" -eq 12 ] && verdict vrai "11d-d. la BASE ~/.cache/baluchon est un lien : code 12, dit" || verdict faux "11d-d. base lien : code 12" "$LAST_RC $LAST_OUT"
+[ "$(cat "$BASE/cache-ailleurs2/9.9.9/plat/claude" 2>/dev/null)" = precieux ] && verdict vrai "11d-d. …ce que le lien désigne est INTACT" || verdict faux "11d-d. …ce que le lien désigne est INTACT"
+rm -f "$H/.cache/baluchon"
+# 11d-e. La suppression passe par des noms RELATIFS : un `rm` instrumenté (premier dans le PATH) journalise ses arguments.
+RMLOG="$BASE/rm.log"; : > "$RMLOG"
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexec /bin/rm "$@"\n' "$RMLOG" > "$FAUX/rm"; chmod +x "$FAUX/rm"
+I="$BASE/cache-relatif"; faire_install "$I"; cache_pose
+printf '%s\n' "$H/.cache/baluchon/9.9.9/plat" > "$I/.baluchon-cache"
+lancer "$I"
+/bin/rm -f "$FAUX/rm"
+[ "$LAST_RC" -eq 0 ] && [ ! -e "$H/.cache/baluchon" ] && verdict vrai "11d-e. une copie ordinaire est retirée avec ses parents vides, base comprise (code 0)" || verdict faux "11d-e. copie ordinaire retirée" "$LAST_RC $LAST_OUT"
+grep -qxF -- '-rf -- ./plat' "$RMLOG" && verdict vrai "11d-e. …par « rm -rf -- ./plat » : un nom RELATIF, depuis le dossier parent" || verdict faux "11d-e. …par un nom relatif" "$(cat "$RMLOG")"
+grep -qF -- "$H/.cache" "$RMLOG" && verdict faux "11d-e. …aucun rm n'a reçu le chemin ABSOLU du cache" "$(cat "$RMLOG")" || verdict vrai "11d-e. …aucun rm n'a reçu le chemin ABSOLU du cache"
+
+# 11e. (revue Codex, 4e passe, constat 8) XDG_CACHE_HOME change entre le rangement des copies et « Partir » : la base
+# où elles ont été rangées est enregistrée (ligne « base ») dans .baluchon-cache ; les copies sont retirées même si
+# le script ne voit plus cette valeur. Une ligne « base » hostile n'étend jamais le champ d'action.
+XD="$BASE/xdg-ancien"; mkdir -p "$XD/baluchon/9.9.9/plat"; printf 'copie\n' > "$XD/baluchon/9.9.9/plat/claude"
+I="$BASE/cache-xdg"; faire_install "$I"
+{ printf 'base %s\n' "$XD/baluchon"; printf '%s\n' "$XD/baluchon/9.9.9/plat"; } > "$I/.baluchon-cache"
+lancer "$I"
+[ "$LAST_RC" -eq 0 ] && verdict vrai "11e. copie rangée sous une AUTRE base (enregistrée) : code 0" || verdict faux "11e. autre base enregistrée : code 0" "$LAST_RC $LAST_OUT"
+[ ! -e "$XD/baluchon" ] && verdict vrai "11e. …la copie ET sa base sont retirées" || verdict faux "11e. …la copie est retirée" "$(find "$XD" 2>/dev/null)"
+[ -d "$XD" ] && verdict vrai "11e. …le dossier qui contenait la base reste (jamais plus haut que la base)" || verdict faux "11e. …le dossier de la base reste"
+mkdir -p "$H/Documents/baluchon-x"; printf 'precieux\n' > "$H/Documents/baluchon-x/n.txt"
+I="$BASE/cache-base-hostile"; faire_install "$I"
+{ printf 'base %s\n' "$H/Documents" "$H/Documents/../Documents/baluchon" "relatif/baluchon" "/baluchon" "$H/Documents//baluchon" "$H/Documents/baluchon-x"
+  printf '%s\n' "$H/Documents/projet" "$H/Documents/baluchon-x" "/baluchon/x" "relatif/baluchon/x"; } > "$I/.baluchon-cache"
+lancer "$I"
+[ "$LAST_RC" -eq 0 ] && temoins_intacts && [ -f "$H/Documents/projet/a.txt" ] && [ -f "$H/Documents/baluchon-x/n.txt" ] \
+  && verdict vrai "11e. lignes « base » hostiles (pas /baluchon, .., relative, //, racine) : rien de touché" \
+  || verdict faux "11e. lignes « base » hostiles : rien de touché" "$LAST_RC $LAST_OUT"
+
 echo
 printf '%d ok, %d ko\n' "$OK" "$KO"
 [ "$KO" -eq 0 ]
