@@ -31,7 +31,16 @@ $SignerId = ($Signer -split ' ')[0]
 $Dir    = if ($env:BALUCHON_DIR) { $env:BALUCHON_DIR } else { "$env:USERPROFILE\.baluchon" }
 $W      = Join-Path $env:TEMP ("baluchon-install-" + [guid]::NewGuid().ToString("N"))
 
-function Fail($msg) { Write-Host "X $msg" -ForegroundColor Red; Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue; exit 1 }
+# Sortie avec code. Lance par -File (amorce de la couche, essais) : `exit`, dont l'appelant lit le code. Lance par
+# `irm ... | iex` (README) : `exit` FERMERAIT la fenetre PowerShell de l'utilisateur avant qu'il ait lu le message
+# (mesure le 16/11/2026) ; on pose alors $LASTEXITCODE et `break`, qui arrete le script sans tuer PowerShell (meme
+# geste que l'installeur de Scoop). Jamais appele depuis une boucle : `break` en sortirait seulement.
+function Stop-Install([int]$code) {
+  if ($PSCommandPath) { exit $code }
+  $global:LASTEXITCODE = $code
+  break
+}
+function Fail($msg) { Write-Host "X $msg" -ForegroundColor Red; Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue; Stop-Install 1 }
 function Ok($msg)   { Write-Host "OK $msg" -ForegroundColor Green }
 function Say($msg)  { Write-Host ". $msg" -ForegroundColor Cyan }
 function Sha($path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLower() }
@@ -123,17 +132,23 @@ if ((Sha "$W\install.sh") -ne $want) { Fail "Empreinte invalide pour install.sh 
 # Chemins en barres obliques (C:/Users/...) : compris par bash comme par Windows. Le script est lu par
 # son CHEMIN dans le dossier prive $W, qui n'est connu que de nous (GUID).
 $env:BALUCHON_DIR = $Dir -replace '\\', '/'
+# Le menu demande (BALUCHON_OUVRIR_MENU=1) n'est PAS ouvert par install.sh : il le serait avant que les commandes
+# .cmd et le PATH (etape 4) existent, et une fenetre fermee pendant le menu laissait une installation sans commande
+# (mesure le 16/11/2026). Il est ouvert a la fin de ce script, par claude.cmd, qui sait finir un "Partir".
+$ouvrirMenu = ($env:BALUCHON_OUVRIR_MENU -eq "1")
+$env:BALUCHON_OUVRIR_MENU = "0"
 & $Bash --noprofile --norc ("$W\install.sh" -replace '\\', '/')
 $rc = $LASTEXITCODE
+if ($ouvrirMenu) { $env:BALUCHON_OUVRIR_MENU = "1" } else { Remove-Item Env:BALUCHON_OUVRIR_MENU -ErrorAction SilentlyContinue }
 Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue
 # "Partir" a pu tout effacer pendant le menu : rien d'autre a poser. Derniere etape (git-win), relue.
 if (-not (Test-Path "$Dir\.baluchon-install")) {
   if (Test-Path -LiteralPath "$Dir\.baluchon-a-finir") {
-    if (Finish-Depart) { Write-Host "  OK Rien ne reste sur cet ordinateur." -ForegroundColor Green; exit $rc }
+    if (Finish-Depart) { Write-Host "  OK Rien ne reste sur cet ordinateur." -ForegroundColor Green; Stop-Install $rc }
     Write-Host "  ! Il reste le dossier $Dir : ferme les fenetres Baluchon puis supprime-le a la main." -ForegroundColor Yellow
-    exit 12
+    Stop-Install 12
   }
-  exit $rc
+  Stop-Install $rc
 }
 if ($rc -ne 0) { Fail "Installation interrompue (code $rc) : relance la meme commande." }
 
@@ -152,6 +167,16 @@ $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($userPath -notlike "*$binDir*") {
   [Environment]::SetEnvironmentVariable("Path", "$userPath;$binDir", "User")
   Write-Host "$binDir ajoute au PATH (rouvre le terminal)." -ForegroundColor Yellow
+}
+if ($ouvrirMenu) {
+  # Le meme chemin que la commande `baluchon` : claude.cmd lance le menu, puis termine lui-meme un "Partir"
+  # (git-win, dossier) et dit "Rien ne reste" ; son code de sortie est le notre. BALUCHON_DEPUIS_LIEN : le
+  # menu sait qu'il vient du lien (question "cet ordinateur est-il a toi ?", Partir en tete sur un poste invite).
+  $env:BALUCHON_DEPUIS_LIEN = "1"
+  & "$Dir\claude.cmd"
+  $rc = $LASTEXITCODE
+  Remove-Item Env:BALUCHON_DEPUIS_LIEN -ErrorAction SilentlyContinue
+  if (-not (Test-Path "$Dir\.baluchon-install")) { Stop-Install $rc }
 }
 Write-Host ""
 Write-Host "OK. Rouvre un terminal et tape :  baluchon" -ForegroundColor Green

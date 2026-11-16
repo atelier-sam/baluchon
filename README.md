@@ -48,12 +48,13 @@ Tout s'installe dans `~/.baluchon` (sessions comprises).
 
 ## Désinstaller
 
-Depuis le menu (macOS / Linux) : **« 🚪 Partir : tout effacer et désinstaller »**, avec une
+Depuis le menu (macOS, Linux, Windows) : **« 🚪 Partir : tout effacer et désinstaller »**, avec une
 confirmation (« Non, annuler » par défaut). Le menu efface les sessions, lance le
 désinstalleur vérifié, puis **relit le disque** : il n'annonce « Rien ne reste sur cet
 ordinateur » que si le dossier, les commandes, les items du Trousseau et les jetons Access
 sont vraiment partis ; sinon il liste ce qui reste. Sur un poste invité, « Partir » est en
-tête du menu.
+tête du menu. Sous Windows, les outils Git de Baluchon (qui font tourner le menu) partent à la
+fermeture du menu, et c'est à ce moment que « Rien ne reste » s'affiche.
 
 Ou sans menu :
 

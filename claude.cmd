@@ -24,6 +24,9 @@ REM (voir uninstall.sh). Ce fichier-ci est efface pendant que cmd l'execute : le
 REM derniere etape tiennent donc dans UN bloc entre parentheses, lu en entier avant d'etre execute.
 REM git-win est retire avec reessais (un guetteur bash peut finir ~2 s apres le menu), puis le
 REM dossier par un rmdir NON recursif : il ne part que s'il est vide, rien d'autre n'est jamais efface.
+REM Chaque sortie passe par "(goto) 2>nul" AVANT exit : ce fichier est efface, et sans cela cmd
+REM tente de le rouvrir en sortant et ecrit deux fois "chemin introuvable", code 1 - mesure le 16/11.
+REM Aucune parenthese fermante dans un REM du bloc : elle le fermerait.
 (
   "%BASH%" --login "%ROOTU%Claude.command"
   if exist "%R%\.baluchon-a-finir" if not exist "%R%\.baluchon-install" (
@@ -34,11 +37,11 @@ REM dossier par un rmdir NON recursif : il ne part que s'il est vide, rien d'aut
     if exist "%R%" (
       echo   [!] Il reste le dossier "%R%" : ferme les fenetres Baluchon puis supprime-le a la main.
       echo.
-      exit /b 12
+      (goto) 2>nul & exit /b 12
     )
     echo   [OK] Rien ne reste sur cet ordinateur.
     echo.
-    exit /b 0
+    (goto) 2>nul & exit /b 0
   )
 )
 set "RC=%ERRORLEVEL%"

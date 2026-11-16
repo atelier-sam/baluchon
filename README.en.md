@@ -48,12 +48,14 @@ Everything is installed under `~/.baluchon` (sessions included).
 
 ## Uninstall
 
-From the menu (macOS / Linux): **"🚪 Partir : tout effacer et désinstaller"** (leave:
+From the menu (macOS, Linux, Windows): **"🚪 Partir : tout effacer et désinstaller"** (leave:
 erase everything and uninstall), with a confirmation ("Non, annuler" is the default). The
 menu erases the sessions, runs the verified uninstaller, then **re-reads the disk**: it
 says "Rien ne reste sur cet ordinateur" (nothing is left on this computer) only if the
 folder, the commands, the Keychain items and the Access tokens are really gone; otherwise
-it lists what remains. On a guest computer, "Partir" is at the top of the menu.
+it lists what remains. On a guest computer, "Partir" is at the top of the menu. On Windows,
+Baluchon's Git tools (which run the menu) leave when the menu closes, and that is when
+"Rien ne reste" is shown.
 
 Or without the menu:
 

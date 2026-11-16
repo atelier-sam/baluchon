@@ -404,7 +404,24 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
   suppression après des contrôles réussis : code 3, profils conservés, relance qui aboutit). Chaque épreuve nouvelle est
   rejouée contre l'ancien code (lu dans l'historique git) et doit y échouer. Les essais posent une clé
   de signature JETABLE à la place de celle du produit.
-- **Limite connue** : Windows (`install.ps1`, menu) n'a pas encore cette chaîne.
+- **Windows** : même chaîne. `install.ps1` n'est qu'une amorce : Git portable (digest de l'API GitHub),
+  `SHA256SUMS` signé vérifié par le `ssh-keygen` de Git portable (celui de `System32\OpenSSH` ne voit pas la fin
+  d'un stdin redirigé et bloque à jamais), puis `install.sh` vérifié, lancé par ce bash : wizard, noyau, Claude,
+  gum, relevé signé et menu sont posés exactement comme sur Mac. Les commandes `baluchon.cmd`… enchaînent sur
+  `claude.cmd` (pas de `call`). Lancé par `irm … | iex`, un échec rend l'invite (`break`) au lieu de fermer la
+  fenêtre ; par `-File` (amorce de la couche), il sort avec son code.
+  « Partir » sous Windows : un exécutable en cours ne s'efface pas (le `rm` de MSYS le déplace dans la Corbeille,
+  où il reste). `uninstall.sh` efface donc tout sauf `git-win` et pose `.baluchon-a-finir` ; `claude.cmd` (dans un
+  seul bloc, puisqu'il est lui-même effacé, sortie par `(goto) 2>nul`) ou `install.ps1`, une fois bash terminé,
+  retirent `git-win` (réessais 30 s, `rmdir /s` qui ne suit pas les jonctions) puis le dossier par un `rmdir` NON
+  récursif, relisent et disent « Rien ne reste » ou ce qui reste (code 12). Un départ inachevé (fenêtre fermée
+  avant) est terminé par le prochain `install.ps1`. Éprouvé le 15-16/11/2026 sur Windows 11 (compte jetable) :
+  installation, relance « à jour » (4,7 s), mise à jour partielle, « Partir » depuis `baluchon.cmd` (poste à
+  soi) et depuis `irm | iex` (poste invité), refus d'une release altérée (`-File` : code 1 ; `iex` : invite
+  rendue), départ inachevé repris ; dossier, commandes et Corbeille vides après chaque « Partir ».
+- **Limite connue (Windows)** : MSYS montre tout dossier comme appartenant à l'utilisateur, sans écriture des
+  autres (montage `noacl`) : le contrôle des ancêtres d'`uninstall.sh` y passe toujours et ne prouve rien. Les
+  ACL Windows ne sont pas lues. Un `install.ps1` qui échoue après l'étape 1 laisse `git-win` (relance immédiate).
 
 ## Poste invité
 
