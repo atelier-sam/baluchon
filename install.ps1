@@ -18,7 +18,7 @@
 #  Toute verification qui echoue ARRETE l'installation.
 #
 #  Variables (facultatives) : BALUCHON_DIR, CCP_DL (source de la release ; la signature reste exigee),
-#  BALUCHON_OUVRIR_MENU=1 (ouvre le menu a la fin), BALUCHON_ETAT_SORTIE (voir install.sh).
+#  BALUCHON_OUVRIR_MENU=1 (ouvre le menu a la fin), BALUCHON_ETAT_SORTIE et BALUCHON_ETAPES (voir install.sh).
 #  Fichier volontairement en ASCII (pas d'accents) : PowerShell 5.1 lit les scripts sans BOM en ANSI.
 # ============================================================
 $ErrorActionPreference = "Stop"
@@ -40,7 +40,10 @@ function Stop-Install([int]$code) {
   $global:LASTEXITCODE = $code
   break
 }
-function Fail($msg) { Write-Host "X $msg" -ForegroundColor Red; Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue; Stop-Install 1 }
+# Reperes d'etape (BALUCHON_ETAPES=1) : meme contrat que etape() d'install.sh, ecrits sur la sortie standard
+# brute (pas Write-Host) pour qu'un appelant qui la lit ligne a ligne les recoive dans l'ordre.
+function Etape($code, $statut) { if ($env:BALUCHON_ETAPES -eq "1") { [Console]::Out.WriteLine("@@etape $code $statut"); [Console]::Out.Flush() } }
+function Fail($msg) { Etape "fin" "echec"; Write-Host "X $msg" -ForegroundColor Red; Remove-Item -Recurse -Force $W -ErrorAction SilentlyContinue; Stop-Install 1 }
 function Ok($msg)   { Write-Host "OK $msg" -ForegroundColor Green }
 function Say($msg)  { Write-Host ". $msg" -ForegroundColor Cyan }
 function Sha($path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLower() }
@@ -90,7 +93,7 @@ function Install-PortableGit {
   if (-not (Test-Path "$Dir\git-win\bin\bash.exe")) { Fail "Git portable mal extrait (bash.exe absent)." }
   Ok "Git portable verifie et installe"
 }
-if (-not (Test-Path "$Dir\git-win\bin\bash.exe")) { Install-PortableGit }
+if (-not (Test-Path "$Dir\git-win\bin\bash.exe")) { Etape "outils" "debut"; Install-PortableGit; Etape "outils" "ok" } else { Etape "outils" "deja" }
 $Bash = "$Dir\git-win\bin\bash.exe"
 
 # TOUJOURS le ssh-keygen de Git portable (verifie a l'etape 1), jamais celui de Windows : le
@@ -151,6 +154,8 @@ if (-not (Test-Path "$Dir\.baluchon-install")) {
   Stop-Install $rc
 }
 if ($rc -ne 0) { Fail "Installation interrompue (code $rc) : relance la meme commande." }
+# install.sh a dit "fin ok" ; sous Windows la vraie fin est apres les commandes .cmd : l'appelant attend
+# "commandes ok" de NOUS, ecrit plus bas, avant de considerer l'installation finie.
 
 # --- 4) Commandes courtes et PATH -------------------------------------------------------------
 $binDir = "$env:USERPROFILE\.local\bin"
@@ -168,6 +173,7 @@ if ($userPath -notlike "*$binDir*") {
   [Environment]::SetEnvironmentVariable("Path", "$userPath;$binDir", "User")
   Write-Host "$binDir ajoute au PATH (rouvre le terminal)." -ForegroundColor Yellow
 }
+Etape "commandes" "ok"
 if ($ouvrirMenu) {
   # Le meme chemin que la commande `baluchon` : claude.cmd lance le menu, puis termine lui-meme un "Partir"
   # (git-win, dossier) et dit "Rien ne reste" ; son code de sortie est le notre. BALUCHON_DEPUIS_LIEN : le

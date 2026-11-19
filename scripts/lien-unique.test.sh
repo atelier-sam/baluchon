@@ -193,6 +193,7 @@ vrai_si "A1. …le désinstalleur posé est celui de la release (empreinte véri
 vrai_si "A1. …les quatre commandes sont posées" test -x "$H/.local/bin/baluchon" -a -x "$H/.local/bin/baluchon1" -a -x "$H/.local/bin/ccp" -a -x "$H/.local/bin/ccp1"
 egal "A1. …le relevé de release porte l'empreinte des sommes signées" "sums $(SHA_REL)" "$(sed -n 2p "$DIR/.baluchon-release")"
 egal "A1. …et son en-tête" "baluchon-release 1" "$(sed -n 1p "$DIR/.baluchon-release")"
+ne_dit_pas "A1. …sans BALUCHON_ETAPES, aucun repère d'étape (sortie inchangée)" "@@etape"
 ne_dit_pas "A1. …sans BALUCHON_OUVRIR_MENU, le menu ne s'ouvre pas" "À bientôt"
 egal "A1. …aucun menu ouvert" 0 "$(nb_menus)"
 
@@ -204,6 +205,12 @@ dit "A2. …dit « déjà installé et à jour »" "déjà installé et à jour"
 egal "A2. …AUCUN téléchargement hors des deux fichiers de signature" 0 "$(lourds)"
 instantane > "$T/apres"
 vrai_si "A2. …aucun fichier de l'installation n'a changé" cmp -s "$T/avant" "$T/apres"
+
+# Contrat des repères d'étape (lu par l'amorce de la couche) : la séquence EXACTE, dans l'ordre.
+reperes() { grep '^@@etape ' "$T/out" | tr '\n' '|'; }
+joue "$INSTALL" BALUCHON_ETAPES=1
+egal "A2b. déjà à jour + BALUCHON_ETAPES=1 : la séquence de repères" \
+  "@@etape signature ok|@@etape programmes deja|@@etape claude deja|@@etape commandes ok|@@etape fin ok|" "$(reperes)"
 
 rm -f "$H/.local/bin/baluchon"
 joue "$INSTALL"
@@ -224,8 +231,10 @@ dit "A4. …dit la commande à taper" "Pour l'ouvrir, tape"
 egal "A4. …aucun menu ouvert de plus" 1 "$(nb_menus)"
 
 rm -f "$DIR/.baluchon-release"
-joue "$INSTALL"
+joue "$INSTALL" BALUCHON_ETAPES=1
 egal "A5. relevé absent (installation interrompue) : tout est refait, état « installe »" installe "$(etat)"
+egal "A5. …installation complète + BALUCHON_ETAPES=1 : la séquence de repères" \
+  "@@etape signature ok|@@etape programmes debut|@@etape programmes ok|@@etape claude debut|@@etape claude ok|@@etape commandes ok|@@etape fin ok|" "$(reperes)"
 vrai_si "A5. …des téléchargements ont eu lieu" test "$(lourds)" -gt 0
 vrai_si "A5. …et le relevé est reposé" test -f "$DIR/.baluchon-release"
 
@@ -261,8 +270,9 @@ vrai_si "B1. …la question « cet ordinateur est-il à toi ? » a été posée 
 monde C "$BASE/release-c"
 release "$BASE/release-c"
 printf '\n# falsifié après signature\n' >> "$BASE/release-c/uninstall.sh"
-joue "$INSTALL"
+joue "$INSTALL" BALUCHON_ETAPES=1
 egal "C1. désinstalleur ≠ sommes signées : code 1" 1 "$RC"
+egal "C1. …le dernier repère dit l'échec (l'amorce ferme la ligne en rouge)" "@@etape fin echec" "$(grep '^@@etape ' "$T/out" | tail -1)"
 dit "C1. …refusé pour empreinte invalide" "Empreinte invalide pour uninstall.sh"
 vrai_si "C1. …aucun relevé « à jour » après l'échec" test ! -e "$DIR/.baluchon-release"
 vrai_si "C1. …et le désinstalleur falsifié n'est PAS posé" test ! -e "$DIR/uninstall.sh"

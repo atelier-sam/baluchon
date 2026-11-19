@@ -25,6 +25,8 @@
 #                           dit la commande à taper et réussit quand même. Défaut : 0.
 #    BALUCHON_ETAT_SORTIE   fichier où écrire « installe » ou « a-jour » (pour l'amorce de l'atelier,
 #                           qui s'en sert pour savoir si elle doit encore poser sa couche).
+#    BALUCHON_ETAPES        1 = écrit aussi des repères « @@etape <code> <statut> » (voir etape()) pour
+#                           un appelant qui affiche ses propres étapes. Défaut : 0.
 # ============================================================
 set -euo pipefail
 
@@ -38,7 +40,12 @@ W=""   # dossier de travail temporaire, global : le piège EXIT le lit
 
 say() { printf '\033[36m• %s\033[0m\n' "$*"; }
 ok()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
-die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+die() { etape fin echec; printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
+# Repères d'étape pour un appelant qui dessine sa propre interface (amorce, assistant) : BALUCHON_ETAPES=1.
+# Une ligne stable « @@etape <code> <statut> » sur la sortie standard ; rien sans la variable. L'appelant
+# garde le reste de la sortie dans un journal. Codes : outils signature programmes claude commandes fin ;
+# statuts : debut ok deja echec. Contrat lu par l'amorce de la couche : ne pas renommer sans elle.
+etape() { [ "${BALUCHON_ETAPES:-0}" = 1 ] && printf '@@etape %s %s\n' "$1" "$2"; return 0; }
 sha() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
 
 # Télécharge un fichier de la release et le vérifie contre SHA256SUMS. $1 = nom publié, $2 = destination.
@@ -116,6 +123,7 @@ installer_complet() {
   # pas finie, rien n'est reconnu (ni « à jour », ni authentifié), et un fichier posé à moitié n'est jamais lancé.
   rm -f "$DIR/.baluchon-release" "$DIR/.baluchon-sums" "$DIR/.baluchon-sums.sig"
 
+  etape programmes debut
   # 2) Wizard + bibliothèque, puis plateforme via la bibliothèque vérifiée. On source la COPIE VÉRIFIÉE
   # gardée dans $W (voir fetch), pas le fichier qui vient d'être posé sous $DIR.
   fetch Claude.command "$DIR/Claude.command"; chmod +x "$DIR/Claude.command"
@@ -143,14 +151,17 @@ installer_complet() {
     fetch claude-classic.cmd "$DIR/claude-classic.cmd"
   fi
   ok "Wizard + noyau baluchon-core vérifiés"
+  etape programmes ok
 
   # 4) Claude (canal stable, vérifié contre le manifest Anthropic) + gum (empreinte épinglée)
   curl -fsSL "https://downloads.claude.ai/claude-code-releases/stable" -o "$W/VERSION" || die "Version de Claude introuvable."
   [ -s "$W/VERSION" ] || die "Version de Claude introuvable."
   poser "$W/VERSION" "$DIR/VERSION" || die "Version de Claude impossible à noter dans $DIR."
   say "Téléchargement du binaire Claude + de l'interface… (peut prendre ~1 min)"
+  etape claude debut
   ( set +e; cc_ensure_binary ) || die "Échec du téléchargement de Claude."
   cc_ensure_gum >/dev/null 2>&1 || printf '\033[33m⚠ Interface gum indisponible : baluchon lancera directement le compte par défaut.\033[0m\n'
+  etape claude ok
 }
 
 # 5) Commandes courtes : `baluchon` / `baluchon1` (2e compte) et leurs alias historiques `ccp` / `ccp1`.
@@ -188,6 +199,7 @@ installer() {
   ssh-keygen -Y verify -f "$W/allowed_signers" -I "$CCP_SIGNER_ID" -n file -s "$W/SHA256SUMS.sig" < "$W/SHA256SUMS" >/dev/null 2>&1 \
     || die "Signature de la release INVALIDE : installation annulée."
   ok "Release authentifiée (signature $CCP_SIGNER_ID)"
+  etape signature ok
 
   if deja_a_jour; then
     etat=a-jour
@@ -197,11 +209,14 @@ installer() {
     . "$LIB_PRIVEE"
     cc_detect_platform
     ok "Baluchon est déjà installé et à jour : rien à télécharger."
+    etape programmes deja; etape claude deja
     poser_commandes   # locale et sans risque : rend la commande à qui l'avait supprimée
+    etape commandes ok
   else
     etat=installe
     installer_complet
     poser_commandes
+    etape commandes ok
     # 6) Couche éventuelle (overlay/) : jamais écrite ici, seulement mise à jour par son crochet.
     cc_layer_hook update || true
     # Le relevé « cette installation est celle de cette release » vient EN DERNIER : il n'existe que si tout
@@ -211,6 +226,7 @@ installer() {
     cc_release_noter "$W/SHA256SUMS" "$W/SHA256SUMS.sig" || printf '\033[33m⚠ Relevé de release non écrit : la prochaine exécution refera tout, et « Partir » restera refusé jusque-là.\033[0m\n'
   fi
   if [ -n "${BALUCHON_ETAT_SORTIE:-}" ]; then printf '%s\n' "$etat" > "$BALUCHON_ETAT_SORTIE" 2>/dev/null || true; fi
+  etape fin ok
 
   # Le menu, si demandé : AVANT les derniers messages, qui parlent de ce qui reste à faire une fois le menu fermé.
   if [ "${BALUCHON_OUVRIR_MENU:-0}" = 1 ]; then
