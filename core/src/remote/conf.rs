@@ -313,10 +313,24 @@ fn is_hex(s: &str) -> bool {
 /// - `<équipe>.cloudflareaccess.com-org-token` : l'IDENTITÉ de l'équipe, qui ouvrirait
 ///   aussi les autres applications Access de l'équipe tant qu'elle vit.
 ///
-/// Le suffixe `.lock` est l'ombre que cloudflared laisse à côté. Reconnaissance STRICTE :
-/// rien d'autre du dossier (certificat, jeton du tunnel côté Mac) n'est jamais touché.
+/// Compagnons d'un jeton, rangés à côté par cloudflared :
+/// - `.lock` : le verrou pendant la connexion ;
+/// - `.url` : l'adresse de connexion (`token.go`, `readAuthURL`/`RunTransfer`), qui porte la clé
+///   de transfert (`token=`) de l'échange. WHY : relevé le 22/11/2026 sur le PC d'essai, un
+///   `<hôte>-<aud>-token.url` restait après « Partir » parce que seul `.lock` était reconnu.
+///
+/// Et le cache `<équipe>.cloudflareaccess.com-jwks` (clés PUBLIQUES de l'équipe, `jwks.go`) avec son
+/// fichier temporaire `.jwks-*.tmp` : pas un secret, mais une trace qui nomme l'équipe de
+/// l'atelier ; « Partir » promet qu'il n'en reste aucune. Son échec d'effacement est rapporté
+/// comme celui d'un jeton (prudent : le bilan ne distingue pas).
+///
+/// Reconnaissance STRICTE : rien d'autre du dossier (certificat, jeton du tunnel côté Mac) n'est
+/// jamais touché.
 pub fn is_access_token_name(name: &str, host: &str) -> bool {
-    let base = name.strip_suffix(".lock").unwrap_or(name);
+    let base = name
+        .strip_suffix(".lock")
+        .or_else(|| name.strip_suffix(".url"))
+        .unwrap_or(name);
     if let Some(mid) = base
         .strip_prefix(host)
         .and_then(|r| r.strip_prefix('-'))
@@ -326,10 +340,25 @@ pub fn is_access_token_name(name: &str, host: &str) -> bool {
             return true;
         }
     }
-    base.strip_suffix(".cloudflareaccess.com-org-token")
-        .is_some_and(|team| {
-            !team.is_empty() && team.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        })
+    let is_team = |team: &str| {
+        !team.is_empty() && team.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
+    if base
+        .strip_suffix(".cloudflareaccess.com-org-token")
+        .is_some_and(is_team)
+    {
+        return true;
+    }
+    // Le cache n'a ni verrou ni adresse : on le reconnaît sur le nom ENTIER, pas sur `base`.
+    if name
+        .strip_suffix(".cloudflareaccess.com-jwks")
+        .is_some_and(is_team)
+    {
+        return true;
+    }
+    name.strip_prefix(".jwks-")
+        .and_then(|r| r.strip_suffix(".tmp"))
+        .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_alphanumeric()))
 }
 
 /// Bilan d'un effacement de jetons Access : ce qui est parti, ce qui est RESTÉ, et pourquoi.
@@ -647,14 +676,26 @@ mod tests {
             "example.cloudflareaccess.com-org-token.lock",
             h
         ));
+        // Relevé sur le PC d'essai le 22/11 : l'adresse de connexion et le cache de clés de l'équipe.
+        assert!(is_access_token_name(&format!("{h}-{AUD}-token.url"), h));
+        assert!(is_access_token_name("example.cloudflareaccess.com-jwks", h));
+        assert!(is_access_token_name(".jwks-1234567890.tmp", h));
         for no in [
             "cert.pem",
             "ccp-mac.token",
             "config.yml",
             "autre.example-00d26537aaaaaaaaaaaaaaaaaaaaaaaaaaaa-token",
+            "autre.example-00d26537aaaaaaaaaaaaaaaaaaaaaaaaaaaa-token.url",
             &format!("{h}-nonhex-token"),
             &format!("x{h}-{AUD}-token"),
+            &format!("{h}-{AUD}-token.url.bak"),
             ".cloudflareaccess.com-org-token",
+            ".cloudflareaccess.com-jwks",
+            "example.cloudflareaccess.com-jwks.lock",
+            "bad/team.cloudflareaccess.com-jwks",
+            ".jwks-.tmp",
+            ".jwks-../x.tmp",
+            "jwks.tmp",
         ] {
             assert!(!is_access_token_name(no, h), "{no}");
         }
@@ -672,6 +713,8 @@ mod tests {
                 "example.cloudflareaccess.com-org-token.lock".to_string(),
                 false,
             ),
+            (format!("{h}-{AUD}-token.url"), false),
+            ("example.cloudflareaccess.com-jwks".to_string(), false),
             ("ccp-mac.token".to_string(), true),
             ("cert.pem".to_string(), true),
         ] {
@@ -679,7 +722,9 @@ mod tests {
             let _ = keep;
         }
         let gone = purge_access_tokens(t.path(), h);
-        assert_eq!(gone.removed.len(), 2, "{gone:?}");
+        assert_eq!(gone.removed.len(), 4, "{gone:?}");
+        assert!(!cf.join(format!("{h}-{AUD}-token.url")).exists());
+        assert!(!cf.join("example.cloudflareaccess.com-jwks").exists());
         assert!(gone.is_complete(), "{gone:?}");
         assert!(cf.join("ccp-mac.token").exists() && cf.join("cert.pem").exists());
         assert!(!cf.join(format!("{h}-{AUD}-token")).exists());
