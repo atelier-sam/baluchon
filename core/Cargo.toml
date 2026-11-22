@@ -1,9 +1,9 @@
 [package]
 name = "baluchon-core"
-# Version de la release du produit (tag `v3.1.0`) : `about --json` et `doctor` la lisent
+# Version de la release du produit (tag `v3.1.1`) : `about --json` et `doctor` la lisent
 # ici, une seule source. `scripts/release.sh` refuse la release si le tag et cette ligne
 # divergent. Le contrat de la ligne de commande (`CONTRACT`, cli.rs) est un autre compteur.
-version = "3.1.0"
+version = "3.1.1"
 edition = "2021"
 # File::try_lock (flock / LockFileEx) est stable depuis Rust 1.89 : on évite une
 # dépendance (fs4) pour le verrou de session.
