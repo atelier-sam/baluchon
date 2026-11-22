@@ -232,8 +232,12 @@ choisir_noyau() { # choisir_noyau <candidat>... : pose CORE au premier authentiq
 }
 manifeste_signe || true
 LDIR="$(couche_dir || true)"
-[ -z "$LDIR" ] || choisir_noyau "$LDIR"/bin/*/baluchon-core || true
-[ -n "$CORE" ] || choisir_noyau "$DIR"/bin/*/baluchon-core || true
+# Le nom .exe d'ABORD : sous Windows le noyau est baluchon-core.exe. Le bash du Git portable résout aussi
+# « baluchon-core » vers « baluchon-core.exe » (glob et -x), mais ce nom-là n'est dans aucune somme signée :
+# seul, il était refusé comme « non authentifié » et « Partir » laissait les jetons Access (vu sur le PC
+# d'essai le 19/11/2026). Ailleurs, le motif .exe ne correspond à rien et [ -x ] l'écarte.
+[ -z "$LDIR" ] || choisir_noyau "$LDIR"/bin/*/baluchon-core.exe "$LDIR"/bin/*/baluchon-core || true
+[ -n "$CORE" ] || choisir_noyau "$DIR"/bin/*/baluchon-core.exe "$DIR"/bin/*/baluchon-core || true
 
 # Ce qui n'a pas pu être effacé : dit à la fin, jamais avalé (revue Codex, 2e passe : un jeton Access
 # non supprimable restait utilisable et le script annonçait « Plus aucune trace »).

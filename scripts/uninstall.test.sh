@@ -770,6 +770,36 @@ lancer "$I"
   && verdict vrai "11e. lignes « base » hostiles (pas /baluchon, .., relative, //, racine) : rien de touché" \
   || verdict faux "11e. lignes « base » hostiles : rien de touché" "$LAST_RC $LAST_OUT"
 
+echo "== 11f. noyau Windows (baluchon-core.exe) : authentifié et lancé =="
+# Vu sur le PC d'essai le 19/11 : sous Windows le noyau s'appelle baluchon-core.exe et le manifeste signé le
+# nomme baluchon-core-<plat>.exe. Le script ne cherchait que « baluchon-core » : le noyau n'était jamais
+# choisi et « Partir » laissait les jetons Access. Ici, un noyau .exe SEUL, signé sous son vrai nom.
+faire_install_exe() { # faire_install_exe <dossier>
+  local d="$1"
+  faire_install "$d"
+  mv "$d/bin/plat/baluchon-core" "$d/bin/plat/baluchon-core.exe"
+  rm -f "$d/.baluchon-sums" "$d/.baluchon-sums.sig"
+  printf '%s  baluchon-core-plat.exe\n' "$(sha "$d/bin/plat/baluchon-core.exe")" > "$d/.baluchon-sums"
+  ssh-keygen -q -Y sign -f "$CLE" -n file "$d/.baluchon-sums" >/dev/null 2>&1
+}
+I="$BASE/noyau-exe"; faire_install_exe "$I"; : > "$JOURNAL_NOYAU"
+lancer "$I"
+grep -q 'accounts purge' "$JOURNAL_NOYAU" && grep -q 'remote forget-access' "$JOURNAL_NOYAU" && [ "$LAST_RC" -eq 0 ] \
+  && verdict vrai "11f. noyau .exe signé sous son nom : lancé (purge des comptes, jetons Access oubliés), code 0" \
+  || verdict faux "11f. noyau .exe : lancé, code 0" "$LAST_RC $(cat "$JOURNAL_NOYAU") $LAST_OUT"
+[ ! -e "$I" ] && temoins_intacts && verdict vrai "11f. …installation retirée, témoins intacts" || verdict faux "11f. …installation retirée, témoins intacts" "$(ls -A "$I" 2>/dev/null)"
+# Contrôle positif : le script d'avant le correctif (6de7e7e) ne lance PAS ce noyau.
+AVANT_EXE="$BASE/uninstall-avant-exe.sh"
+if env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git -C "$HERE" show 6de7e7e:uninstall.sh > "$AVANT_EXE" 2>/dev/null && [ -s "$AVANT_EXE" ]; then
+  I="$BASE/noyau-exe-avant"; faire_install_exe "$I"; : > "$JOURNAL_NOYAU"
+  SCRIPT_SOUS_TEST="$AVANT_EXE" lancer "$I"
+  ! grep -q 'remote forget-access' "$JOURNAL_NOYAU" \
+    && verdict vrai "11f. CONTRÔLE POSITIF : l'ancien script n'appelait pas le noyau .exe (jetons Access laissés)" \
+    || verdict faux "11f. CONTRÔLE POSITIF : l'ancien script n'appelait pas le noyau .exe" "$(cat "$JOURNAL_NOYAU")"
+else
+  echo "(!) historique git absent : contrôle positif 11f sauté"
+fi
+
 echo
 printf '%d ok, %d ko\n' "$OK" "$KO"
 [ "$KO" -eq 0 ]
