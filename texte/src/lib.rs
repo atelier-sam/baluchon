@@ -7,8 +7,11 @@
 //! U+202E s'affiche `exe.jpg`. Une largeur nulle (U+200B…) cache une partie du texte ou fabrique
 //! deux noms qui se ressemblent à s'y méprendre.
 //!
-//! La crate porte donc UNE liste ([`PLAGES`]), ses deux usages ([`invisible_trompeur`],
-//! [`sans_invisibles`]) et l'assainissement d'une ligne ([`assainir`]). WHY une crate et non une
+//! La crate porte donc UNE liste ([`PLAGES`]), ses deux usages (le prédicat STRICT
+//! [`invisible_trompeur`] pour les noms et les libellés, [`trompeur_dans_un_message`] pour le texte
+//! libre, qui garde l'emoji et le persan) et l'assainissement d'une ligne ([`assainir`]). Les deux
+//! prédicats lisent la MÊME table : la différence est une propriété de la famille de chaque plage,
+//! pas une seconde liste. WHY une crate et non une
 //! copie par programme : la liste vivait en cinq exemplaires, dont deux sous-ensembles (le sens
 //! d'écriture seul, ou sans largeur nulle). Un texte propre à un endroit ne l'était plus à
 //! l'autre, et un caractère ajouté d'un côté n'arrivait jamais de l'autre.
@@ -26,11 +29,20 @@ pub enum Famille {
     /// Marques de sens d'écriture : ALM, LRM, RLM, LRE, RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI.
     /// Elles retournent le texte qui suit.
     SensEcriture,
-    /// Largeur nulle : ZWSP, ZWNJ, ZWJ, WJ, BOM, trait d'union conditionnel (invisible hors
-    /// coupure de ligne). Elles cachent une partie du texte ou le dédoublent.
+    /// Largeur nulle : ZWSP, WJ, BOM, trait d'union conditionnel (invisible hors coupure de
+    /// ligne). Elles cachent une partie du texte ou le dédoublent.
     LargeurNulle,
-    /// Sélecteurs de variation : ils ne changent que la forme du caractère précédent.
+    /// Liants de largeur nulle : ZWNJ (U+200C) et ZWJ (U+200D). Invisibles, mais ils portent du
+    /// sens : le ZWNJ est indispensable à l'écriture du persan, le ZWJ à la composition des emoji
+    /// (👨‍👩‍👧). Trompeurs dans un nom, légitimes dans un message.
+    Liant,
+    /// Sélecteurs de variation (et leurs équivalents mongols, hangul…) autres que les deux de la
+    /// famille [`Famille::Presentation`] : ils ne changent que la forme du caractère précédent,
+    /// et leur grand nombre sert à cacher des octets entiers derrière un caractère.
     Selecteur,
+    /// Les DEUX sélecteurs de présentation, U+FE0E (texte) et U+FE0F (emoji) : « ❤️ » et « ✔️ »
+    /// en dépendent. Trompeurs dans un nom, légitimes dans un message.
+    Presentation,
     /// Caractères de balise (U+E0000 à U+E007F) : de l'ASCII invisible, sans usage dans un texte
     /// qu'on affiche.
     Balise,
@@ -42,9 +54,19 @@ impl Famille {
         match self {
             Famille::SensEcriture => "sens-ecriture",
             Famille::LargeurNulle => "largeur-nulle",
+            Famille::Liant => "liant",
             Famille::Selecteur => "selecteur",
+            Famille::Presentation => "presentation",
             Famille::Balise => "balise",
         }
+    }
+
+    /// Cette famille survit-elle dans un MESSAGE (texte libre qu'une personne écrit à une autre) ?
+    /// Oui pour [`Famille::Liant`] et [`Famille::Presentation`], non pour toutes les autres. C'est
+    /// une propriété de la table et non une seconde liste : une plage ajoutée à `PLAGES` est
+    /// jugée, pour les noms comme pour les messages, par la famille qu'on lui donne.
+    pub const fn survit_dans_un_message(self) -> bool {
+        matches!(self, Famille::Liant | Famille::Presentation)
     }
 }
 
@@ -75,12 +97,14 @@ const fn plage(debut: char, fin: char, famille: Famille) -> Plage {
 pub const PLAGES: &[Plage] = &[
     plage('\u{00AD}', '\u{00AD}', Famille::LargeurNulle),
     plage('\u{061C}', '\u{061C}', Famille::SensEcriture),
-    plage('\u{200B}', '\u{200D}', Famille::LargeurNulle),
+    plage('\u{200B}', '\u{200B}', Famille::LargeurNulle),
+    plage('\u{200C}', '\u{200D}', Famille::Liant),
     plage('\u{200E}', '\u{200F}', Famille::SensEcriture),
     plage('\u{202A}', '\u{202E}', Famille::SensEcriture),
     plage('\u{2060}', '\u{2060}', Famille::LargeurNulle),
     plage('\u{2066}', '\u{2069}', Famille::SensEcriture),
-    plage('\u{FE00}', '\u{FE0F}', Famille::Selecteur),
+    plage('\u{FE00}', '\u{FE0D}', Famille::Selecteur),
+    plage('\u{FE0E}', '\u{FE0F}', Famille::Presentation),
     plage('\u{FEFF}', '\u{FEFF}', Famille::LargeurNulle),
     plage('\u{E0000}', '\u{E007F}', Famille::Balise),
 ];
@@ -102,12 +126,39 @@ pub fn invisible_trompeur(c: char) -> bool {
     famille_de(c).is_some()
 }
 
-/// `s` sans aucun invisible trompeur. Rend `s` lui-même, sans copie, quand il n'en porte pas.
-pub fn sans_invisibles(s: &str) -> Cow<'_, str> {
-    if !s.chars().any(invisible_trompeur) {
+/// `c` est-il trompeur dans un MESSAGE (texte libre) ? C'est [`invisible_trompeur`] SAUF pour les
+/// familles [`Famille::Liant`] et [`Famille::Presentation`] (voir
+/// [`Famille::survit_dans_un_message`]) : ZWNJ, ZWJ, U+FE0E et U+FE0F, et ces QUATRE seulement.
+///
+/// WHY quatre caractères et non « tous les sélecteurs » : ils gardent l'emoji (« ❤️ », « 👨‍👩‍👧 »,
+/// « 🏳️‍🌈 ») et le persan, mais sans laisser de canal caché exploitable. Les 256 sélecteurs de
+/// variation (U+FE00 à U+FE0F, U+E0100 à U+E01EF) servent à cacher des octets entiers derrière un
+/// caractère visible, et les balises (U+E0000 à U+E007F) se lisent comme de l'ASCII par un modèle
+/// de langage : un texte qui arrive devant un modèle ne doit pas lui être lisible là où il est
+/// invisible pour la personne qui le lit.
+pub fn trompeur_dans_un_message(c: char) -> bool {
+    famille_de(c).is_some_and(|f| !f.survit_dans_un_message())
+}
+
+/// Retire de `s` les caractères que `trompeur` désigne. Rend `s` lui-même, sans copie, quand il
+/// n'en porte aucun.
+fn retirer(s: &str, trompeur: fn(char) -> bool) -> Cow<'_, str> {
+    if !s.chars().any(trompeur) {
         return Cow::Borrowed(s);
     }
-    Cow::Owned(s.chars().filter(|c| !invisible_trompeur(*c)).collect())
+    Cow::Owned(s.chars().filter(|c| !trompeur(*c)).collect())
+}
+
+/// `s` sans aucun invisible trompeur (le prédicat STRICT : noms, libellés, lignes d'un outil).
+/// Rend `s` lui-même, sans copie, quand il n'en porte pas.
+pub fn sans_invisibles(s: &str) -> Cow<'_, str> {
+    retirer(s, invisible_trompeur)
+}
+
+/// `s` sans aucun caractère [trompeur dans un message](trompeur_dans_un_message) : l'emoji et le
+/// persan survivent. Rend `s` lui-même, sans copie, quand il n'en porte pas.
+pub fn sans_invisibles_de_message(s: &str) -> Cow<'_, str> {
+    retirer(s, trompeur_dans_un_message)
 }
 
 /// Coupe `s` à `max` octets au plus, sur une frontière de caractère.
@@ -206,13 +257,13 @@ mod tests {
         ),
         (
             '\u{200C}',
-            Famille::LargeurNulle,
+            Famille::Liant,
             "sv\u{200C}chost.exe",
             "svchost.exe",
         ),
         (
             '\u{200D}',
-            Famille::LargeurNulle,
+            Famille::Liant,
             "sv\u{200D}chost.exe",
             "svchost.exe",
         ),
@@ -234,7 +285,9 @@ mod tests {
             "s\u{00AD}vchost.exe",
             "svchost.exe",
         ),
-        ('\u{FE0F}', Famille::Selecteur, "a\u{FE0F}b", "ab"),
+        ('\u{FE00}', Famille::Selecteur, "a\u{FE00}b", "ab"),
+        ('\u{FE0E}', Famille::Presentation, "a\u{FE0E}b", "ab"),
+        ('\u{FE0F}', Famille::Presentation, "a\u{FE0F}b", "ab"),
         ('\u{E0041}', Famille::Balise, "a\u{E0041}b", "ab"),
     ];
 
@@ -307,7 +360,9 @@ mod tests {
         for f in [
             Famille::SensEcriture,
             Famille::LargeurNulle,
+            Famille::Liant,
             Famille::Selecteur,
+            Famille::Presentation,
             Famille::Balise,
         ] {
             assert!(PLAGES.iter().any(|p| p.famille == f), "{f:?} sans plage");
@@ -347,6 +402,70 @@ mod tests {
             assert!(
                 matches!(sans_invisibles(s), Cow::Borrowed(t) if t == s),
                 "{s:?} ne doit pas être copié"
+            );
+        }
+    }
+
+    /// Les QUATRE caractères qu'un message garde : ZWNJ, ZWJ et les deux sélecteurs de présentation.
+    const GARDES_DANS_UN_MESSAGE: [char; 4] = ['\u{200C}', '\u{200D}', '\u{FE0E}', '\u{FE0F}'];
+
+    #[test]
+    fn un_message_garde_exactement_quatre_caracteres_que_le_predicat_strict_retire() {
+        let mut gardes = Vec::new();
+        for n in 0..=0x10FFFF_u32 {
+            if let Some(c) = char::from_u32(n) {
+                // Le prédicat de message n'est jamais PLUS large que le strict.
+                assert!(!trompeur_dans_un_message(c) || invisible_trompeur(c));
+                if invisible_trompeur(c) && !trompeur_dans_un_message(c) {
+                    gardes.push(c);
+                }
+            }
+        }
+        assert_eq!(gardes, GARDES_DANS_UN_MESSAGE);
+        for c in GARDES_DANS_UN_MESSAGE {
+            // Le prédicat strict (noms de fichier, libellés) les retire bien.
+            assert!(invisible_trompeur(c), "U+{:04X}", c as u32);
+            let nom = format!("sv{c}chost");
+            assert_eq!(sans_invisibles(&nom), "svchost", "U+{:04X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn l_emoji_et_le_persan_passent_intacts_dans_un_message() {
+        for s in [
+            "❤\u{FE0F}",                                   // cœur, présentation emoji
+            "✔\u{FE0F} fait",                              // coche, présentation emoji
+            "\u{2764}\u{FE0E}",                            // cœur, présentation texte
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", // famille (liants)
+            "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}",          // drapeau arc-en-ciel (FE0F puis ZWJ)
+            // Un mot persan écrit avec un ZWNJ au milieu (« je veux »).
+            "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}",
+        ] {
+            assert!(
+                matches!(sans_invisibles_de_message(s), Cow::Borrowed(t) if t == s),
+                "{s:?} doit passer intact dans un message"
+            );
+        }
+    }
+
+    #[test]
+    fn un_message_perd_le_reste_des_invisibles_et_les_canaux_caches() {
+        for (c, nom) in [
+            ('\u{202E}', "sens d'écriture"),
+            ('\u{061C}', "U+061C"),
+            ('\u{200B}', "largeur nulle"),
+            ('\u{2060}', "mot-lien"),
+            ('\u{FEFF}', "BOM"),
+            ('\u{00AD}', "trait d'union conditionnel"),
+            ('\u{FE00}', "sélecteur de variation"),
+            ('\u{E0041}', "balise"),
+        ] {
+            assert!(trompeur_dans_un_message(c), "{nom} (U+{:04X})", c as u32);
+            let brut = format!("sa{c}lut \u{2764}\u{FE0F}");
+            assert_eq!(
+                sans_invisibles_de_message(&brut),
+                "salut \u{2764}\u{FE0F}",
+                "{nom} doit disparaître, l'emoji rester"
             );
         }
     }
