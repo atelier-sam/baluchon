@@ -6,9 +6,25 @@
 #   - KeePassXC.KeePassXC : absent ; le paquet existe sous KeePassXCTeam.KeePassXC.
 # Volontairement absent : CCleaner (version gratuite écartée pour sa licence).
 #
+# Suite ArtCraft (catégorie « ArtCraft », 14 applis, aucune cochée par défaut) : chaque identifiant a été
+# revérifié le 26/11/2026 contre les manifestes officiels manifests/a/ArtCraft/<Nom>/ de microsoft/winget-pkgs
+# (version courante lue : installateur MSI « wix », portée machine, aucune dépendance déclarée ; un
+# identifiant par dossier, PackageIdentifier relu dans chacun). Écartés : ArtCraft.ArtCraft (un IDE
+# d'images par IA) et ArtCraft.CraftAnything, qui sont d'AUTRES produits. Le lanceur de la suite n'est
+# pas dans winget : il n'est pas proposé ici. Chaque libellé reprend la ShortDescription du manifeste
+# officiel, traduite et abrégée, sans rien y ajouter.
+#
 # Surcharge : `<racine>/config/catalog.toml`, même format, fusion PAR CLÉ champ par
 # champ (`remove = true` retire une entrée ; une clé nouvelle doit avoir label + winget).
 # Les libellés ne contiennent ni virgule (gum --selected sépare par virgule) ni tabulation.
+#
+# PACKS (`[[pack]]`, en fin de fichier) : une liste nommée de logiciels, jamais recopiée. Un pack a
+# `key`, `label` et EXACTEMENT UNE source : `apps = [clés]` (liste explicite), `category = "X"` (toute
+# une catégorie) ou `defaults = true` (les entrées `default = true`). Les deux dernières se DÉRIVENT du
+# catalogue final, surcharge comprise. Un pack ne cite jamais un pack ; sa clé n'est jamais celle d'une
+# appli. Même fusion par clé (`remove = true` retire un pack ; une source donnée par la surcharge
+# remplace celle du pack). Une clé citée qui n'existe plus (ou a été retirée par la surcharge) est une
+# erreur qui nomme le pack : la surcharge est alors ignorée avec son message.
 
 [[app]]
 key = "chrome"
@@ -149,3 +165,137 @@ label = "Visual C++ Redistributable 2015-2022 (x64)"
 category = "Composants"
 winget = "Microsoft.VCRedist.2015+.x64"
 default = true
+
+# ---- Suite ArtCraft (éditeur Learning Machines LLC) ---------------------------------------------------
+
+[[app]]
+key = "artcraft-word"
+label = "WordCraft (réimplémentation libre de Word)"
+category = "ArtCraft"
+winget = "ArtCraft.WordCraft"
+default = false
+
+[[app]]
+key = "artcraft-grid"
+label = "GridCraft (tableur : réimplémentation libre d'Excel)"
+category = "ArtCraft"
+winget = "ArtCraft.GridCraft"
+default = false
+
+[[app]]
+key = "artcraft-deck"
+label = "DeckCraft (présentations : réimplémentation libre de PowerPoint)"
+category = "ArtCraft"
+winget = "ArtCraft.DeckCraft"
+default = false
+
+[[app]]
+key = "artcraft-pdf"
+label = "PdfCraft (outils PDF : réimplémentation libre d'Acrobat)"
+category = "ArtCraft"
+winget = "ArtCraft.PdfCraft"
+default = false
+
+[[app]]
+key = "artcraft-photo"
+label = "PhotoCraft (réimplémentation libre de Photoshop)"
+category = "ArtCraft"
+winget = "ArtCraft.PhotoCraft"
+default = false
+
+[[app]]
+key = "artcraft-light"
+label = "LightCraft (photothèque et RAW : réimplémentation libre de Lightroom)"
+category = "ArtCraft"
+winget = "ArtCraft.LightCraft"
+default = false
+
+[[app]]
+key = "artcraft-vector"
+label = "VectorCraft (illustration vectorielle : réimplémentation libre d'Illustrator)"
+category = "ArtCraft"
+winget = "ArtCraft.VectorCraft"
+default = false
+
+[[app]]
+key = "artcraft-design"
+label = "DesignCraft (mise en page et édition : réimplémentation libre d'InDesign)"
+category = "ArtCraft"
+winget = "ArtCraft.DesignCraft"
+default = false
+
+[[app]]
+key = "artcraft-film"
+label = "FilmCraft (montage vidéo : réimplémentation libre de Premiere Pro)"
+category = "ArtCraft"
+winget = "ArtCraft.FilmCraft"
+default = false
+
+[[app]]
+key = "artcraft-effect"
+label = "EffectCraft (effets visuels : réimplémentation libre d'After Effects)"
+category = "ArtCraft"
+winget = "ArtCraft.EffectCraft"
+default = false
+
+[[app]]
+key = "artcraft-sound"
+label = "SoundCraft (réimplémentation libre du flux de travail de Pro Tools)"
+category = "ArtCraft"
+winget = "ArtCraft.SoundCraft"
+default = false
+
+[[app]]
+key = "artcraft-cad"
+label = "CadCraft (réimplémentation libre d'AutoCAD)"
+category = "ArtCraft"
+winget = "ArtCraft.CadCraft"
+default = false
+
+[[app]]
+key = "artcraft-material"
+label = "MaterialCraft (matériaux PBR procéduraux par nœuds)"
+category = "ArtCraft"
+winget = "ArtCraft.MaterialCraft"
+default = false
+
+[[app]]
+key = "artcraft-texture"
+label = "TextureCraft (peinture de textures 3D)"
+category = "ArtCraft"
+winget = "ArtCraft.TextureCraft"
+default = false
+
+# ---- Packs --------------------------------------------------------------------------------------------
+
+[[pack]]
+key = "artcraft-bureautique"
+label = "ArtCraft bureautique"
+apps = ["artcraft-word", "artcraft-grid", "artcraft-deck", "artcraft-pdf"]
+
+[[pack]]
+key = "artcraft-photo-dessin"
+label = "ArtCraft photo et dessin"
+apps = ["artcraft-photo", "artcraft-light", "artcraft-vector", "artcraft-design"]
+
+[[pack]]
+key = "artcraft-video-son"
+label = "ArtCraft vidéo et son"
+apps = ["artcraft-film", "artcraft-effect", "artcraft-sound"]
+
+[[pack]]
+key = "artcraft-3d"
+label = "ArtCraft 3D"
+apps = ["artcraft-cad", "artcraft-material", "artcraft-texture"]
+
+# Dérivé de la catégorie : une appli ArtCraft de plus (ou de moins) change ce pack sans qu'on y touche.
+[[pack]]
+key = "artcraft-suite"
+label = "Toute la suite ArtCraft"
+category = "ArtCraft"
+
+# Dérivé du drapeau `default = true` : cocher ou décocher une entrée change ce pack sans qu'on y touche.
+[[pack]]
+key = "essentiels"
+label = "Essentiels d'un PC neuf"
+defaults = true

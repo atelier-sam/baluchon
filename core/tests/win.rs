@@ -119,6 +119,137 @@ fn catalog_override_in_the_root_is_merged() {
     assert!(!out.contains("vlc\t"));
 }
 
+/// Les 20 premières lignes de `win catalog` d'avant la suite ArtCraft : le wizard les affiche en tête, dans cet ordre.
+const WIZARD_KEYS_BEFORE_ARTCRAFT: [&str; 20] = [
+    "chrome",
+    "firefox",
+    "libreoffice",
+    "thunderbird",
+    "acrobat-reader",
+    "notepadpp",
+    "winrar",
+    "7zip",
+    "vlc",
+    "powertoys",
+    "keepassxc",
+    "malwarebytes",
+    "anydesk",
+    "teamviewer",
+    "zoom",
+    "teams",
+    "onedrive",
+    "java",
+    "dotnet-desktop",
+    "vcredist",
+];
+
+#[test]
+fn catalog_lists_the_twenty_historical_lines_then_the_fourteen_artcraft_and_no_pack() {
+    let sb = Sb::new();
+    let o = sb.cmd(true).args(["win", "catalog"]).output().unwrap();
+    let (out, err, code) = s(&o);
+    assert_eq!(code, 0, "{err}");
+    let keys: Vec<&str> = out.lines().map(|l| l.split('\t').next().unwrap()).collect();
+    assert_eq!(keys.len(), 34, "{out}");
+    assert_eq!(keys[..20], WIZARD_KEYS_BEFORE_ARTCRAFT);
+    assert!(
+        keys[20..].iter().all(|k| k.starts_with("artcraft-")),
+        "{keys:?}"
+    );
+    // Rien de ce que le wizard affiche n'est un pack, ni côté gum ni côté JSON.
+    for pack in [
+        "essentiels",
+        "artcraft-suite",
+        "artcraft-bureautique",
+        "artcraft-3d",
+    ] {
+        assert!(
+            !keys.contains(&pack),
+            "{pack} est un pack, pas une ligne du wizard"
+        );
+    }
+    for l in out.lines() {
+        assert_eq!(l.split('\t').count(), 3, "{l}");
+        assert!(!l.split('\t').nth(1).unwrap().contains(','), "{l}");
+    }
+    let j = sb
+        .cmd(true)
+        .args(["win", "catalog", "--format", "json"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&j.stdout).unwrap();
+    assert_eq!(v["apps"].as_array().unwrap().len(), 34);
+    assert!(
+        v.get("packs").is_none(),
+        "win catalog ne porte pas les packs"
+    );
+}
+
+#[test]
+fn the_wizard_keeps_working_with_a_pack_table_in_the_override() {
+    let sb = Sb::new();
+    std::fs::create_dir_all(sb.root().join("config")).unwrap();
+    std::fs::write(
+        sb.root().join("config/catalog.toml"),
+        "[[app]]\nkey = \"chrome\"\ndefault = false\n\n\
+         [[pack]]\nkey = \"mon-pack\"\nlabel = \"Mon pack\"\napps = [\"vlc\", \"chrome\"]\n\n\
+         [[pack]]\nkey = \"artcraft-3d\"\nremove = true\n",
+    )
+    .unwrap();
+    let o = sb.cmd(true).args(["win", "catalog"]).output().unwrap();
+    let (out, err, code) = s(&o);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.is_empty(), "aucun avertissement attendu : {err}");
+    // L'appli surchargée l'est bien (la surcharge s'applique), et aucun pack n'apparaît.
+    assert!(out.contains("chrome\tGoogle Chrome\t0\n"), "{out}");
+    assert!(
+        !out.contains("mon-pack") && !out.contains("artcraft-3d\t"),
+        "{out}"
+    );
+    assert_eq!(out.lines().count(), 34);
+    // Et on installe toujours par clé : une appli ArtCraft passe par winget avec son identifiant exact.
+    let (winget, log) = fake_winget(&sb, "");
+    let o = sb
+        .cmd(true)
+        .env("CCP_WINGET_BIN", &winget)
+        .args(["win", "install", "artcraft-word"])
+        .output()
+        .unwrap();
+    let (out, err, code) = s(&o);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.lines().next(), Some("ok\tartcraft-word\tinstallé"));
+    let logged = std::fs::read_to_string(log).unwrap();
+    assert_eq!(
+        logged.lines().next().unwrap(),
+        "install --id ArtCraft.WordCraft -e --silent --accept-package-agreements \
+         --accept-source-agreements --disable-interactivity --source winget"
+    );
+}
+
+#[test]
+fn a_broken_pack_in_the_override_makes_the_wizard_fall_back_with_a_warning() {
+    let sb = Sb::new();
+    std::fs::create_dir_all(sb.root().join("config")).unwrap();
+    // Un pack qui cite une appli que la même surcharge retire : tout le fichier est ignoré (gimp compris).
+    std::fs::write(
+        sb.root().join("config/catalog.toml"),
+        "[[app]]\nkey = \"gimp\"\nlabel = \"GIMP\"\nwinget = \"GIMP.GIMP.3\"\n\n\
+         [[app]]\nkey = \"vlc\"\nremove = true\n\n\
+         [[pack]]\nkey = \"mon-pack\"\nlabel = \"Mon pack\"\napps = [\"vlc\"]\n",
+    )
+    .unwrap();
+    let o = sb.cmd(true).args(["win", "catalog"]).output().unwrap();
+    let (out, err, code) = s(&o);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("surcharge ignorée"), "{err}");
+    assert!(
+        err.contains("mon-pack") && err.contains("« vlc » a été retirée par"),
+        "{err}"
+    );
+    assert!(out.contains("vlc\t") && !out.contains("gimp\t"), "{out}");
+    assert_eq!(out.lines().count(), 34);
+}
+
 #[test]
 fn every_win_command_is_refused_with_exit_2_off_windows() {
     let sb = Sb::new();

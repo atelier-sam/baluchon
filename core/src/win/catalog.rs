@@ -13,7 +13,7 @@ use crate::error::{CcpError, Result};
 pub use baluchon_winget::catalog::{
     clean_label, render_lines, valid_key, valid_winget_id, App, EMBEDDED,
 };
-use baluchon_winget::catalog::{merge, parse_file};
+use baluchon_winget::catalog::{merge_catalogue, parse_catalogue, Fichier};
 use baluchon_winget::Erreur;
 use serde::Serialize;
 use std::path::Path;
@@ -44,34 +44,39 @@ pub fn embedded() -> Result<Vec<App>> {
 /// Catalogue embarqué + surcharge de la racine. Une surcharge illisible ou
 /// invalide n'empêche pas le wizard de proposer le catalogue de base : on la
 /// signale sur stderr et on l'ignore (`warn` reçoit le message).
+///
+/// WHY les packs sont jugés ici alors que le wizard n'en sert aucun : la surcharge est UN fichier,
+/// qui s'applique ou ne s'applique pas. Un `[[pack]]` fautif (clé citée retirée, pack vide…) doit
+/// la faire ignorer en entier avec son message, exactement comme une appli fautive ; sinon le
+/// wizard afficherait un catalogue que la console, elle, aurait refusé, et deux vues d'un même
+/// fichier divergeraient. Seule la partie applis est rendue (`Vec<App>`, chemins d'avant).
 pub fn load(root_dir: &Path, warn: &mut dyn FnMut(String)) -> Result<Vec<App>> {
-    let base = parse_file(EMBEDDED, "catalogue embarqué")?;
     let file = root_dir.join("config").join(OVERRIDE_FILE);
+    let origin = file.display().to_string();
     let over = match std::fs::read_to_string(&file) {
-        Ok(text) => match parse_file(&text, &file.display().to_string()) {
+        Ok(text) => match parse_catalogue(&text, &origin) {
             Ok(v) => v,
             Err(m) => {
                 warn(format!("{m} ; surcharge ignorée."));
-                Vec::new()
+                Fichier::default()
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Fichier::default(),
         Err(e) => {
             warn(format!(
                 "{} illisible ({e}) ; surcharge ignorée.",
                 file.display()
             ));
-            Vec::new()
+            Fichier::default()
         }
     };
-    let origin = file.display().to_string();
+    let base = parse_catalogue(EMBEDDED, "catalogue embarqué")?;
     // Si la fusion échoue À CAUSE de la surcharge, on retombe sur l'embarqué seul.
-    let base_again = parse_file(EMBEDDED, "catalogue embarqué")?;
-    match merge(base, over, &origin) {
-        Ok(v) => Ok(v),
+    match merge_catalogue(base, over, &origin) {
+        Ok(c) => Ok(c.apps),
         Err(m) => {
             warn(format!("{m} ; surcharge ignorée."));
-            Ok(merge(base_again, Vec::new(), "catalogue embarqué")?)
+            embedded()
         }
     }
 }
@@ -151,6 +156,58 @@ mod tests {
             assert_eq!(apps, embedded().unwrap(), "repli attendu pour {bad:?}");
             assert_eq!(warnings.len(), 1, "{bad:?}");
             assert!(warnings[0].contains("surcharge ignorée"), "{warnings:?}");
+        }
+    }
+
+    #[test]
+    fn a_valid_pack_override_merges_and_the_wizard_apps_are_unchanged() {
+        let t = tempfile::tempdir().unwrap();
+        write_override(
+            t.path(),
+            "[[pack]]\nkey = \"mon-pack\"\nlabel = \"Mon pack\"\napps = [\"vlc\", \"chrome\"]\n\n\
+             [[pack]]\nkey = \"artcraft-3d\"\nremove = true\n",
+        );
+        let mut warnings = Vec::new();
+        let apps = load(t.path(), &mut |m| warnings.push(m)).unwrap();
+        // Les packs ne touchent pas la liste du wizard : mêmes applis que l'embarqué, aucun avertissement.
+        assert_eq!(apps, embedded().unwrap());
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_broken_pack_override_is_ignored_as_a_whole_with_the_usual_warning() {
+        // Chaque cas change AUSSI une appli : si la surcharge était appliquée à moitié, la liste différerait.
+        let appli = "[[app]]\nkey = \"gimp\"\nlabel = \"GIMP\"\nwinget = \"GIMP.GIMP.3\"\n\n";
+        for (bad, dit) in [
+            (
+                "[[pack]]\nkey = \"p\"\nlabel = \"P\"\napps = [\"nope\"]\n",
+                "« nope » n'existe pas",
+            ),
+            (
+                "[[app]]\nkey = \"artcraft-word\"\nremove = true\n",
+                "« artcraft-word » a été retirée par",
+            ),
+            (
+                "[[pack]]\nkey = \"p\"\nlabel = \"P\"\napps = [\"vlc\"]\ncategory = \"ArtCraft\"\n",
+                "plusieurs sources",
+            ),
+            (
+                "[[pack]]\nkey = \"p\"\nlabel = \"P\"\n[[pack]]\nkey = \"p\"\nlabel = \"Q\"\n",
+                "clé de pack en double",
+            ),
+        ] {
+            let t = tempfile::tempdir().unwrap();
+            write_override(t.path(), &format!("{appli}{bad}"));
+            let mut warnings = Vec::new();
+            let apps = load(t.path(), &mut |m| warnings.push(m)).unwrap();
+            assert_eq!(apps, embedded().unwrap(), "repli attendu pour {bad:?}");
+            assert!(!apps.iter().any(|a| a.key == "gimp"), "{bad:?}");
+            assert_eq!(warnings.len(), 1, "{bad:?} : {warnings:?}");
+            assert!(warnings[0].contains("surcharge ignorée"), "{warnings:?}");
+            assert!(
+                warnings[0].contains(dit),
+                "« {dit} » absent de {warnings:?}"
+            );
         }
     }
 
