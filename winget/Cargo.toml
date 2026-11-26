@@ -1,0 +1,24 @@
+[package]
+name = "baluchon-winget"
+version = "0.1.0"
+edition = "2021"
+# Même plancher que le noyau qui la lie : une seule chaîne d'outils pour tout le produit.
+rust-version = "1.89"
+description = "Moteur winget de Baluchon : catalogue de logiciels, arguments, codes de sortie, verdicts"
+license = "MIT"
+# WHY false : comme le noyau, le produit se livre en binaires signés. Une crate publiée ne se
+# retire jamais, et la forme de ces traits n'a pas de tiers à servir.
+publish = false
+
+[lib]
+name = "baluchon_winget"
+path = "src/lib.rs"
+
+# Deux dépendances, pas une de plus : cette crate est liée par des programmes qui n'ont rien à
+# faire d'un client HTTP, de TLS ni d'une interface en ligne de commande (c'est toute la raison
+# de son extraction). Le JSON, les erreurs du noyau et l'exécution de processus restent côté
+# appelant : voir `RealWinget` dans le noyau.
+# Versions identiques à celles du noyau (`core/Cargo.toml`).
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }

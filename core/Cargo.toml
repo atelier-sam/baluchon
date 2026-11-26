@@ -43,6 +43,10 @@ secrecy = "0.10"
 jiff = "0.2"
 # Catalogue de logiciels (TOML embarqué + surcharge config/catalog.toml).
 toml = { version = "1.2.1", default-features = false, features = ["parse", "serde"] }
+# Moteur winget (catalogue embarqué, arguments, codes de sortie, verdicts) : extrait dans une
+# crate à part pour que d'autres programmes l'utilisent sans tirer TLS ni clap. `win/winget.rs`
+# et `win/catalog.rs` en sont la façade ; `cargo deny` du noyau couvre aussi son arbre.
+baluchon-winget = { path = "../winget" }
 # Archives des outils téléchargés (cloudflared .tgz, OpenSSH .zip) : en Rust pur,
 # car tar/unzip du système sont absents ou différents selon l'OS du PC client.
 flate2 = "1.1.11"

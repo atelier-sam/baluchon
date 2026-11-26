@@ -69,6 +69,7 @@ name = "baluchon-core"
 version = "3.1.2"
 dependencies = [
  "baluchon-testkit",
+ "baluchon-winget",
  "clap",
  "flate2",
  "jiff",
@@ -94,6 +95,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tiny_http",
+]
+
+[[package]]
+name = "baluchon-winget"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml",
 ]
 
 [[package]]
