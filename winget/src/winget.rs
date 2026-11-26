@@ -223,10 +223,35 @@ pub trait Sortie {
     fn annule(&self) -> bool;
 }
 
+/// Un caractère de formatage invisible qui peut tromper la lecture d'une ligne ou en cacher une partie.
+///
+/// WHY : `char::is_control` ne les attrape pas (ce sont des caractères de FORMAT, pas de commande). Une marque de sens d'écriture
+/// (U+202E « droite à gauche ») retourne tout ce qui suit : `gpj.exe` précédé d'un U+202E s'affiche `exe.jpg`, si bien qu'un nom de
+/// logiciel ou un détail d'échec montré à un technicien peut mentir sur ce qu'il dit. Une largeur nulle (U+200B…) cache une partie du
+/// texte ou fabrique deux lignes qui se ressemblent. Le texte qui sort d'ici est destiné à être AFFICHÉ : il n'en porte aucun.
+///
+/// L'ensemble (marques de sens d'écriture, largeurs nulles, trait d'union conditionnel, sélecteurs de variation, caractères de
+/// balise) doit rester le même chez tous ceux qui nettoient un texte avant de l'afficher : sinon un texte propre à un endroit ne
+/// l'est plus à l'autre.
+fn invisible_trompeur(c: char) -> bool {
+    matches!(
+        c,
+        // Marques de sens d'écriture : ALM, LRM, RLM, LRE, RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI.
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        // Largeur nulle : ZWSP, ZWNJ, ZWJ, WJ, BOM, trait d'union conditionnel.
+        | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}'
+        // Sélecteurs de variation et caractères de balise : invisibles, sans usage dans une sortie de winget.
+        | '\u{FE00}'..='\u{FE0F}' | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
 /// Découpe un flux d'octets en lignes, sur `\n` ET sur `\r` : winget redessine ses barres de
 /// progression par un simple retour chariot, sans jamais aller à la ligne.
 ///
 /// - Une ligne vide n'est jamais rendue (donc `\r\n` ne donne rien de plus que `\n`).
+/// - Les caractères de commande ET les caractères de format invisibles trompeurs (sens d'écriture,
+///   largeur nulle) sont retirés : une ligne rendue est sûre à afficher. Ce type DÉCOUPE et nettoie ;
+///   il ne juge pas le sens de la ligne.
 /// - Une ligne plus longue que la borne est COUPÉE : le surplus est jeté jusqu'au saut suivant,
 ///   la mémoire reste bornée quoi que la sortie contienne.
 /// - Les octets s'accumulent AVANT d'être lus en UTF-8 : un caractère coupé entre deux lectures
@@ -278,7 +303,7 @@ impl Decoupeur {
         let propre: String = texte
             .chars()
             .map(|c| if c == '\t' { ' ' } else { c })
-            .filter(|c| !c.is_control())
+            .filter(|c| !c.is_control() && !invisible_trompeur(*c))
             .collect();
         let propre = propre.trim();
         if !propre.is_empty() {
@@ -317,7 +342,7 @@ pub fn summarize_output(text: &str) -> String {
         .split(['\r', '\n'])
         .map(|l| {
             l.chars()
-                .filter(|c| !c.is_control() || *c == '\t')
+                .filter(|c| (!c.is_control() || *c == '\t') && !invisible_trompeur(*c))
                 .collect::<String>()
                 .trim()
                 .to_string()
@@ -572,6 +597,22 @@ mod tests {
     }
 
     #[test]
+    fn summarize_strips_bidi_and_zero_width_characters_from_the_detail() {
+        // Le détail d'un échec est AFFICHÉ au technicien : aucune marque de sens d'écriture, aucune largeur nulle n'y survit.
+        for &c in INVISIBLES {
+            let raw = format!("Installer failed\r\ngpj{c}.exe a \u{202E}echoue\n");
+            assert_eq!(
+                summarize_output(&raw),
+                "Installer failed / gpj.exe a echoue",
+                "U+{:04X} doit être retiré",
+                c as u32
+            );
+        }
+        // Le texte ordinaire n'est pas touché (accents, CJK).
+        assert_eq!(summarize_output("Échec de l’installation 日本\n"), "Échec de l’installation 日本");
+    }
+
+    #[test]
     fn install_one_maps_success_already_and_failure() {
         let w = Fake::new(vec![
             out(0, "Successfully installed"),
@@ -635,6 +676,44 @@ mod tests {
             d.fin(&mut |l| v.push(l.to_string()));
         }
         v
+    }
+
+    /// Les caractères de format invisibles qui trompent un affichage, un par famille et aux deux bornes de chaque plage.
+    const INVISIBLES: &[char] = &[
+        '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
+        '\u{2068}', '\u{2069}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}', '\u{00AD}', '\u{FE00}', '\u{FE0F}',
+        '\u{E0000}', '\u{E007F}',
+    ];
+
+    #[test]
+    fn decoupeur_strips_bidi_and_zero_width_characters() {
+        // U+202E devant `gpj.exe` ferait lire `exe.jpg` ; chacun des caractères de la liste disparaît, le reste est intact.
+        for &c in INVISIBLES {
+            let mut d = Decoupeur::new(LIGNE_MAX);
+            let brut = format!("gpj{c}.exe\n");
+            let v = lignes(&mut d, &[brut.as_bytes()], true);
+            assert_eq!(v, ["gpj.exe"], "U+{:04X} doit être retiré", c as u32);
+        }
+        // Une ligne qui n'est QUE de l'invisible n'est jamais rendue (comme une ligne vide).
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        let seul = format!("{}{}\u{202E}\n", '\u{200B}', '\u{FEFF}');
+        assert!(lignes(&mut d, &[seul.as_bytes()], true).is_empty());
+    }
+
+    #[test]
+    fn decoupeur_strips_an_invisible_character_split_between_two_reads() {
+        // U+202E = E2 80 AE, coupé entre deux lectures du tuyau : reconstitué PUIS retiré.
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        let v = lignes(&mut d, &[b"un\xe2\x80", b"\xaenom\n"], true);
+        assert_eq!(v, ["unnom"]);
+    }
+
+    #[test]
+    fn decoupeur_keeps_ordinary_text_beyond_ascii() {
+        // Le nettoyage ne touche que les caractères de format : accents, cyrillique, CJK, emoji et le U+2019 typographique passent.
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        let v = lignes(&mut d, &[b"Gestionnaire d\xe2\x80\x99\xc3\xa9tat \xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82 \xe6\x97\xa5\xe6\x9c\xac \xf0\x9f\x93\xa6\n"], true);
+        assert_eq!(v, ["Gestionnaire d’état Привет 日本 📦"]);
     }
 
     #[test]
