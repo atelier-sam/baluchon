@@ -11,8 +11,9 @@
 # (version courante lue : installateur MSI « wix », portée machine, aucune dépendance déclarée ; un
 # identifiant par dossier, PackageIdentifier relu dans chacun). Écartés : ArtCraft.ArtCraft (un IDE
 # d'images par IA) et ArtCraft.CraftAnything, qui sont d'AUTRES produits. Le lanceur de la suite n'est
-# pas dans winget : il n'est pas proposé ici. Chaque libellé reprend la ShortDescription du manifeste
-# officiel, traduite et abrégée, sans rien y ajouter.
+# pas dans winget : il n'est pas proposé ici. Chaque libellé donne le nom, la fonction en clair puis le
+# logiciel que la ShortDescription du manifeste officiel dit remplacer, sous une seule forme :
+# « Nom (fonction : alternative libre à X) » (MaterialCraft et TextureCraft n'en remplacent aucun).
 #
 # Surcharge : `<racine>/config/catalog.toml`, même format, fusion PAR CLÉ champ par
 # champ (`remove = true` retire une entrée ; une clé nouvelle doit avoir label + winget).
@@ -170,91 +171,91 @@ default = true
 
 [[app]]
 key = "artcraft-word"
-label = "WordCraft (réimplémentation libre de Word)"
+label = "WordCraft (traitement de texte : alternative libre à Word)"
 category = "ArtCraft"
 winget = "ArtCraft.WordCraft"
 default = false
 
 [[app]]
 key = "artcraft-grid"
-label = "GridCraft (tableur : réimplémentation libre d'Excel)"
+label = "GridCraft (tableur : alternative libre à Excel)"
 category = "ArtCraft"
 winget = "ArtCraft.GridCraft"
 default = false
 
 [[app]]
 key = "artcraft-deck"
-label = "DeckCraft (présentations : réimplémentation libre de PowerPoint)"
+label = "DeckCraft (présentations : alternative libre à PowerPoint)"
 category = "ArtCraft"
 winget = "ArtCraft.DeckCraft"
 default = false
 
 [[app]]
 key = "artcraft-pdf"
-label = "PdfCraft (outils PDF : réimplémentation libre d'Acrobat)"
+label = "PdfCraft (outils PDF : alternative libre à Acrobat)"
 category = "ArtCraft"
 winget = "ArtCraft.PdfCraft"
 default = false
 
 [[app]]
 key = "artcraft-photo"
-label = "PhotoCraft (réimplémentation libre de Photoshop)"
+label = "PhotoCraft (retouche photo : alternative libre à Photoshop)"
 category = "ArtCraft"
 winget = "ArtCraft.PhotoCraft"
 default = false
 
 [[app]]
 key = "artcraft-light"
-label = "LightCraft (photothèque et RAW : réimplémentation libre de Lightroom)"
+label = "LightCraft (photothèque et RAW : alternative libre à Lightroom)"
 category = "ArtCraft"
 winget = "ArtCraft.LightCraft"
 default = false
 
 [[app]]
 key = "artcraft-vector"
-label = "VectorCraft (illustration vectorielle : réimplémentation libre d'Illustrator)"
+label = "VectorCraft (illustration vectorielle : alternative libre à Illustrator)"
 category = "ArtCraft"
 winget = "ArtCraft.VectorCraft"
 default = false
 
 [[app]]
 key = "artcraft-design"
-label = "DesignCraft (mise en page et édition : réimplémentation libre d'InDesign)"
+label = "DesignCraft (mise en page : alternative libre à InDesign)"
 category = "ArtCraft"
 winget = "ArtCraft.DesignCraft"
 default = false
 
 [[app]]
 key = "artcraft-film"
-label = "FilmCraft (montage vidéo : réimplémentation libre de Premiere Pro)"
+label = "FilmCraft (montage vidéo : alternative libre à Premiere Pro)"
 category = "ArtCraft"
 winget = "ArtCraft.FilmCraft"
 default = false
 
 [[app]]
 key = "artcraft-effect"
-label = "EffectCraft (effets visuels : réimplémentation libre d'After Effects)"
+label = "EffectCraft (effets visuels : alternative libre à After Effects)"
 category = "ArtCraft"
 winget = "ArtCraft.EffectCraft"
 default = false
 
 [[app]]
 key = "artcraft-sound"
-label = "SoundCraft (réimplémentation libre du flux de travail de Pro Tools)"
+label = "SoundCraft (montage audio : alternative libre à Pro Tools)"
 category = "ArtCraft"
 winget = "ArtCraft.SoundCraft"
 default = false
 
 [[app]]
 key = "artcraft-cad"
-label = "CadCraft (réimplémentation libre d'AutoCAD)"
+label = "CadCraft (dessin technique et CAO : alternative libre à AutoCAD)"
 category = "ArtCraft"
 winget = "ArtCraft.CadCraft"
 default = false
 
 [[app]]
 key = "artcraft-material"
-label = "MaterialCraft (matériaux PBR procéduraux par nœuds)"
+label = "MaterialCraft (matériaux 3D PBR par nœuds)"
 category = "ArtCraft"
 winget = "ArtCraft.MaterialCraft"
 default = false

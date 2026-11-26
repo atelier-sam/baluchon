@@ -207,8 +207,9 @@ pub fn merge_catalogue(base: Fichier, over: Fichier, origin: &str) -> Result<Cat
             origin
         };
         if !valid_key(&raw.key) {
+            // `qui`, pas `origin` : la faute peut venir de la base, et la surcharge n'y est pour rien.
             return Err(Erreur::Invalide(format!(
-                "{origin} : clé invalide « {} »",
+                "{qui} : clé invalide « {} »",
                 raw.key
             )));
         }
@@ -773,6 +774,122 @@ mod tests {
                 !apps.iter().any(|a| a.winget == id),
                 "{id} ne doit pas figurer"
             );
+        }
+    }
+
+    /// Les 14 libellés EXACTS, tels qu'ils s'affichent dans le wizard.
+    const LIBELLES_ARTCRAFT: [(&str, &str); 14] = [
+        (
+            "artcraft-word",
+            "WordCraft (traitement de texte : alternative libre à Word)",
+        ),
+        (
+            "artcraft-grid",
+            "GridCraft (tableur : alternative libre à Excel)",
+        ),
+        (
+            "artcraft-deck",
+            "DeckCraft (présentations : alternative libre à PowerPoint)",
+        ),
+        (
+            "artcraft-pdf",
+            "PdfCraft (outils PDF : alternative libre à Acrobat)",
+        ),
+        (
+            "artcraft-photo",
+            "PhotoCraft (retouche photo : alternative libre à Photoshop)",
+        ),
+        (
+            "artcraft-light",
+            "LightCraft (photothèque et RAW : alternative libre à Lightroom)",
+        ),
+        (
+            "artcraft-vector",
+            "VectorCraft (illustration vectorielle : alternative libre à Illustrator)",
+        ),
+        (
+            "artcraft-design",
+            "DesignCraft (mise en page : alternative libre à InDesign)",
+        ),
+        (
+            "artcraft-film",
+            "FilmCraft (montage vidéo : alternative libre à Premiere Pro)",
+        ),
+        (
+            "artcraft-effect",
+            "EffectCraft (effets visuels : alternative libre à After Effects)",
+        ),
+        (
+            "artcraft-sound",
+            "SoundCraft (montage audio : alternative libre à Pro Tools)",
+        ),
+        (
+            "artcraft-cad",
+            "CadCraft (dessin technique et CAO : alternative libre à AutoCAD)",
+        ),
+        (
+            "artcraft-material",
+            "MaterialCraft (matériaux 3D PBR par nœuds)",
+        ),
+        ("artcraft-texture", "TextureCraft (peinture de textures 3D)"),
+    ];
+
+    #[test]
+    fn les_quatorze_libelles_artcraft_sont_exacts_et_d_une_seule_forme() {
+        let apps = embedded().unwrap();
+        for (cle, attendu) in LIBELLES_ARTCRAFT {
+            let a = apps.iter().find(|a| a.key == cle).unwrap();
+            assert_eq!(a.label, attendu);
+            // Une seule forme « Nom (fonction : alternative libre à X) » ; deux logiciels n'en remplacent aucun.
+            let sans_remplacement = ["artcraft-material", "artcraft-texture"].contains(&cle);
+            assert_eq!(
+                a.label.contains(" : alternative libre à "),
+                !sans_remplacement,
+                "{}",
+                a.label
+            );
+            assert!(a.label.ends_with(')'), "{}", a.label);
+            // Plus de jargon : le mot de l'éditeur ne doit pas revenir.
+            assert!(!a.label.to_lowercase().contains("réimplémentation"));
+        }
+        // Les 14 de la table sont bien les 14 de la catégorie (aucun libellé oublié, aucun en trop).
+        assert_eq!(
+            LIBELLES_ARTCRAFT.len(),
+            apps.iter().filter(|a| a.category == "ArtCraft").count()
+        );
+    }
+
+    #[test]
+    fn une_cle_d_appli_invalide_nomme_le_fichier_qui_l_a_ecrite() {
+        // Dans la BASE : la faute n'est pas celle de la surcharge, le message nomme le catalogue embarqué.
+        let fautive = "[[app]]\nkey = \"Majuscule\"\nlabel = \"X\"\nwinget = \"A.B\"\n";
+        let base = parse_catalogue(fautive, "catalogue embarqué").unwrap();
+        let sur = parse_catalogue("", "surcharge").unwrap();
+        match merge_catalogue(base, sur, "surcharge") {
+            Err(Erreur::Invalide(m)) => {
+                assert!(
+                    m.contains("le catalogue embarqué : clé invalide « Majuscule »"),
+                    "{m}"
+                );
+                assert!(
+                    !m.contains("surcharge"),
+                    "la surcharge n'y est pour rien : {m}"
+                );
+            }
+            autre => panic!("refus attendu, reçu {autre:?}"),
+        }
+        // Contrôle positif : la même clé dans la SURCHARGE nomme la surcharge.
+        let base = parse_catalogue(EMBEDDED, "catalogue embarqué").unwrap();
+        let sur = parse_catalogue(fautive, "surcharge").unwrap();
+        match merge_catalogue(base, sur, "surcharge") {
+            Err(Erreur::Invalide(m)) => {
+                assert!(
+                    m.starts_with("surcharge : clé invalide « Majuscule »"),
+                    "{m}"
+                );
+                assert!(!m.contains("le catalogue embarqué"), "{m}");
+            }
+            autre => panic!("refus attendu, reçu {autre:?}"),
         }
     }
 
