@@ -538,7 +538,7 @@ cc_layer_core() {
   name="$(cc_layer_field name)"; [ -n "$name" ] || name="sans nom"
   raw="$CC_LAYER_DIR/bin/$CORE_PLAT/baluchon-core$EXE"
   # Sur une installation, le noyau de la couche n'est sondé que si son empreinte a été NOTÉE par celui qui
-  # connaît la clé de la couche (l'amorce de l'atelier, après avoir vérifié les sommes signées de la
+  # connaît la clé de la couche (l'amorce de la couche, après avoir vérifié les sommes signées de la
   # couche) : ce fichier-ci ne connaît pas cette clé. Sans note : noyau public, et la ligne dit pourquoi.
   if cc_strict; then want="$(cc_ref_get "${raw#"$ROOT"/}")"; fi
   if [ ! -f "$raw" ]; then why="pas de noyau pour $CORE_PLAT"
@@ -566,7 +566,7 @@ cc_layer_core() {
 cc_layer_hook() {
   local h="$ROOT/overlay/hooks/$1" rc=0 priv="" want
   [ -f "$h" ] || return 0
-  # L'amorce de l'atelier, seule à connaître la clé de la couche, pose BALUCHON_SANS_CROCHET=1 quand elle n'a
+  # L'amorce de la couche, seule à connaître la clé de la couche, pose BALUCHON_SANS_CROCHET=1 quand elle n'a
   # pas pu authentifier le crochet installé : il n'est alors pas exécuté (elle repose elle-même la couche).
   if [ "${BALUCHON_SANS_CROCHET:-}" = 1 ]; then cc_info "Couche : crochet « $1 » non exécuté (non authentifié)."; return 0; fi
   # Sur une installation, un crochet ne s'exécute que s'il a l'empreinte NOTÉE par celui qui connaît la clé de la
@@ -580,7 +580,7 @@ cc_layer_hook() {
     chmod 700 "$priv" 2>/dev/null || true
     if [ -z "$want" ] || [ -L "$h" ] || ! cp "$h" "$priv/hook" || [ "$(cc_sha256 "$priv/hook")" != "$want" ]; then
       rm -rf "$priv"
-      cc_warn "Couche : le crochet « $1 » n'a pas d'empreinte authentifiée : non exécuté. Relance le lien d'installation de l'atelier pour le revérifier."
+      cc_warn "Couche : le crochet « $1 » n'a pas d'empreinte authentifiée : non exécuté. Relance le lien d'installation pour le revérifier."
       return 0
     fi
     h="$priv/hook"
@@ -988,7 +988,7 @@ cc_wipe() {
 }
 
 # ─── Un seul lien chez le client ────────────────────────────────────────────────────────────
-# Le lien d'installation (install.sh, ou l'amorce de l'atelier) doit se suffire à lui-même : installer,
+# Le lien d'installation (install.sh, ou l'amorce de la couche) doit se suffire à lui-même : installer,
 # se reconnaître déjà installé et à jour, ouvrir le menu, et permettre d'en PARTIR sans rien laisser.
 # Tout ce qui suit est partagé par install.sh, l'amorce et Claude.command, pour n'avoir qu'une
 # définition de « installé », de « à jour » et de « ce qui reste » (tests : scripts/lien-unique.test.sh

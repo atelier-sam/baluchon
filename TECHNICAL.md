@@ -241,8 +241,8 @@ les jetons Cloudflare Access (`remote forget-access`), puis supprime le dossier 
 
 Un même lien installe, se reconnaît « déjà à jour », ouvre le menu et permet d'en partir. Les
 définitions de « installé », « à jour » et « ce qui reste » vivent une seule fois, dans le dernier
-bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dépôt privé) et
-`Claude.command`.
+bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de la couche (qui vit hors de ce dépôt)
+et `Claude.command`.
 
 - **Relevé de release `.baluchon-release`** (écrit EN DERNIER, après une installation ou une mise à
   jour complète, via fichier temporaire + `mv`) : `baluchon-release 1`, `sums <sha256 du SHA256SUMS
@@ -267,8 +267,8 @@ bloc de `lib/common.sh`, partagé par `install.sh`, l'amorce de l'atelier (dép�
     réécrit par un tiers ne passe pas. Il authentifie le menu, la bibliothèque, le désinstalleur et
     le noyau public.
   - **`.baluchon-refs`** (une ligne `<sha256>  <chemin>`) note ce que le manifeste ne couvre pas :
-    le binaire Claude (téléchargé et vérifié par l'installeur auprès de l'éditeur), `gum`, et, côté
-    atelier, le noyau et les crochets de la couche (notés par l'amorce, qui seule connaît la clé de la
+    le binaire Claude (téléchargé et vérifié par l'installeur auprès de l'éditeur), `gum`, et, quand
+    une couche est posée, son noyau et ses crochets (notés par l'amorce, qui seule connaît la clé de la
     couche et en a vérifié les sommes signées). Un fichier absent de ces deux listes n'est pas lancé.
   - `cc_open_menu` ne lance le menu que si `cc_installation_authentique` est vraie ; `Claude.command`
     revérifie le binaire Claude (`cc_bin_verifie`) juste avant de le lancer ; le crochet de couche est

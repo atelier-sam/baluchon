@@ -320,8 +320,8 @@ fn is_hex(s: &str) -> bool {
 ///   `<hôte>-<aud>-token.url` restait après « Partir » parce que seul `.lock` était reconnu.
 ///
 /// Et le cache `<équipe>.cloudflareaccess.com-jwks` (clés PUBLIQUES de l'équipe, `jwks.go`) avec son
-/// fichier temporaire `.jwks-*.tmp` : pas un secret, mais une trace qui nomme l'équipe de
-/// l'atelier ; « Partir » promet qu'il n'en reste aucune. Son échec d'effacement est rapporté
+/// fichier temporaire `.jwks-*.tmp` : pas un secret, mais une trace qui nomme l'équipe
+/// qui héberge l'accès ; « Partir » promet qu'il n'en reste aucune. Son échec d'effacement est rapporté
 /// comme celui d'un jeton (prudent : le bilan ne distingue pas).
 ///
 /// Reconnaissance STRICTE : rien d'autre du dossier (certificat, jeton du tunnel côté Mac) n'est

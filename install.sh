@@ -23,7 +23,7 @@
 #    CCP_DL                 source de la release (recette locale ; la signature reste exigée)
 #    BALUCHON_OUVRIR_MENU   1 = ouvre le menu à la fin, sur le terminal (/dev/tty). Sans terminal,
 #                           dit la commande à taper et réussit quand même. Défaut : 0.
-#    BALUCHON_ETAT_SORTIE   fichier où écrire « installe » ou « a-jour » (pour l'amorce de l'atelier,
+#    BALUCHON_ETAT_SORTIE   fichier où écrire « installe » ou « a-jour » (pour l'amorce de la couche,
 #                           qui s'en sert pour savoir si elle doit encore poser sa couche).
 #    BALUCHON_ETAPES        1 = écrit aussi des repères « @@etape <code> <statut> » (voir etape()) pour
 #                           un appelant qui affiche ses propres étapes. Défaut : 0.

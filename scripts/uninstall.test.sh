@@ -138,7 +138,7 @@ signe_noyau() { # signe_noyau <dossier>
   [ -f "$d/.baluchon-sums" ] || : > "$d/.baluchon-sums"
   ssh-keygen -q -Y sign -f "$CLE" -n file "$d/.baluchon-sums" >/dev/null 2>&1
 }
-# Ce que l'amorce de l'atelier note après avoir vérifié la couche : l'empreinte d'un fichier de overlay/ (.baluchon-refs).
+# Ce que l'amorce de la couche note après avoir vérifié la couche : l'empreinte d'un fichier de overlay/ (.baluchon-refs).
 note_ref() { # note_ref <dossier> <chemin relatif à ce dossier>
   printf '%s  %s\n' "$(sha "$1/$2")" "$2" >> "$1/.baluchon-refs"
 }

@@ -170,7 +170,7 @@ verifie_ou_refuse
 #   - noyau public (bin/<plat>/baluchon-core) : empreinte du manifeste SIGNÉ que l'installation a conservé
 #     (.baluchon-sums + .sig), dont la signature est vérifiée ICI sur une copie privée, avec la clé épinglée ;
 #   - noyau de la couche (overlay/gen/<nom>/bin/<plat>/baluchon-core) : empreinte notée dans .baluchon-refs
-#     par l'amorce de l'atelier, seule à connaître la clé de la couche (elle y vérifie les sommes signées de la
+#     par l'amorce de la couche, seule à connaître la clé de la couche (elle y vérifie les sommes signées de la
 #     couche avant de noter) ;
 #   - crochet uninstall de la couche : même règle que le noyau de la couche.
 # Honnêteté : .baluchon-refs est écrit avec les droits de l'utilisateur ; il protège d'un fichier remplacé SEUL,
@@ -359,7 +359,7 @@ if [ -n "$CORE" ]; then
 elif [ -f "$DIR/config/remote.conf" ] || [ -f "$DIR/.baluchon-acces" ]; then
   incomplet 10 "Aucun noyau authentifié n'a répondu${CORE_REFUSES:+ (non lancés, empreinte non authentifiée : $CORE_REFUSES)} : les jetons Cloudflare Access éventuels (fichiers « …-token » de ~/.cloudflared) n'ont pas pu être effacés."
 fi
-# Les hôtes que l'AMORCE de l'atelier a notés dans .baluchon-acces (noms seulement, un par ligne) parce que
+# Les hôtes que l'AMORCE de la couche a notés dans .baluchon-acces (noms seulement, un par ligne) parce que
 # ses jetons Access avaient pu rester : ils ne sont pas dans config/remote.conf, donc le `forget-access`
 # sans argument ci-dessus ne les voit pas. Un nom qui n'est pas un nom d'hôte sûr est ignoré.
 if [ -n "$CORE" ] && [ -f "$DIR/.baluchon-acces" ] && [ ! -L "$DIR/.baluchon-acces" ]; then
