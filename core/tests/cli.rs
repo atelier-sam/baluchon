@@ -13,13 +13,20 @@
 // Le faux serveur, le bac à sable et les aides vivent dans `core/testkit`
 // (partagés avec les tests de la couche privée) ; ici seulement l'enveloppe qui
 // fixe le binaire testé, pour que les appels `Sandbox::new()` des tests restent tels quels.
-use baluchon_testkit::{
-    account, code, creds_json, healthy, now_ms, stderr, stdout, wait_for, Fake,
-};
+use baluchon_testkit::{account, code, creds_json, healthy, now_ms, stderr, stdout, Fake};
 use serde_json::{json, Value};
 use std::ops::{Deref, DerefMut};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::Command;
+// Ces trois noms ne servent qu'aux essais `#[cfg(unix)]` (faux `claude` en script shell,
+// attente d'un processus lancé) : sous Windows ils seraient inutilisés, et la porte de
+// compilation croisée tourne en `-D warnings`.
+#[cfg(unix)]
+use baluchon_testkit::wait_for;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::process::Stdio;
 
 const BIN: &str = env!("CARGO_BIN_EXE_baluchon-core");
 
