@@ -7,6 +7,11 @@
 //! appelant implémente avec SON exécuteur (le noyau : `RealWinget`, borné par `run_bounded`).
 
 use crate::catalog::App;
+// WHY la liste vient d'une crate : une ligne rendue ici est AFFICHÉE à un technicien (nom de logiciel,
+// détail d'un échec), et `char::is_control` n'attrape pas les caractères de FORMAT (U+202E retourne
+// `gpj.exe` en `exe.jpg`, U+200B cache une partie du texte). La liste doit être la même chez tous ceux
+// qui nettoient un texte avant de l'afficher : elle ne vit donc qu'à un endroit.
+use baluchon_texte::invisible_trompeur;
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -221,28 +226,6 @@ pub trait Sortie {
 
     /// L'appelant veut-il arrêter l'installation ? Interrogé entre deux lectures.
     fn annule(&self) -> bool;
-}
-
-/// Un caractère de formatage invisible qui peut tromper la lecture d'une ligne ou en cacher une partie.
-///
-/// WHY : `char::is_control` ne les attrape pas (ce sont des caractères de FORMAT, pas de commande). Une marque de sens d'écriture
-/// (U+202E « droite à gauche ») retourne tout ce qui suit : `gpj.exe` précédé d'un U+202E s'affiche `exe.jpg`, si bien qu'un nom de
-/// logiciel ou un détail d'échec montré à un technicien peut mentir sur ce qu'il dit. Une largeur nulle (U+200B…) cache une partie du
-/// texte ou fabrique deux lignes qui se ressemblent. Le texte qui sort d'ici est destiné à être AFFICHÉ : il n'en porte aucun.
-///
-/// L'ensemble (marques de sens d'écriture, largeurs nulles, trait d'union conditionnel, sélecteurs de variation, caractères de
-/// balise) doit rester le même chez tous ceux qui nettoient un texte avant de l'afficher : sinon un texte propre à un endroit ne
-/// l'est plus à l'autre.
-fn invisible_trompeur(c: char) -> bool {
-    matches!(
-        c,
-        // Marques de sens d'écriture : ALM, LRM, RLM, LRE, RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI.
-        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-        // Largeur nulle : ZWSP, ZWNJ, ZWJ, WJ, BOM, trait d'union conditionnel.
-        | '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}'
-        // Sélecteurs de variation et caractères de balise : invisibles, sans usage dans une sortie de winget.
-        | '\u{FE00}'..='\u{FE0F}' | '\u{E0000}'..='\u{E007F}'
-    )
 }
 
 /// Découpe un flux d'octets en lignes, sur `\n` ET sur `\r` : winget redessine ses barres de
@@ -599,7 +582,7 @@ mod tests {
     #[test]
     fn summarize_strips_bidi_and_zero_width_characters_from_the_detail() {
         // Le détail d'un échec est AFFICHÉ au technicien : aucune marque de sens d'écriture, aucune largeur nulle n'y survit.
-        for &c in INVISIBLES {
+        for c in invisibles() {
             let raw = format!("Installer failed\r\ngpj{c}.exe a \u{202E}echoue\n");
             assert_eq!(
                 summarize_output(&raw),
@@ -609,7 +592,10 @@ mod tests {
             );
         }
         // Le texte ordinaire n'est pas touché (accents, CJK).
-        assert_eq!(summarize_output("Échec de l’installation 日本\n"), "Échec de l’installation 日本");
+        assert_eq!(
+            summarize_output("Échec de l’installation 日本\n"),
+            "Échec de l’installation 日本"
+        );
     }
 
     #[test]
@@ -678,17 +664,19 @@ mod tests {
         v
     }
 
-    /// Les caractères de format invisibles qui trompent un affichage, un par famille et aux deux bornes de chaque plage.
-    const INVISIBLES: &[char] = &[
-        '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}',
-        '\u{2068}', '\u{2069}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}', '\u{00AD}', '\u{FE00}', '\u{FE0F}',
-        '\u{E0000}', '\u{E007F}',
-    ];
+    /// Les caractères de format invisibles qui trompent un affichage : les deux bornes de chaque plage de la liste PARTAGÉE
+    /// (`baluchon-texte`), jamais une liste recopiée ici. Que la liste gagne une plage, et ces épreuves la jouent aussi.
+    fn invisibles() -> Vec<char> {
+        baluchon_texte::PLAGES
+            .iter()
+            .flat_map(|p| [p.debut, p.fin])
+            .collect()
+    }
 
     #[test]
     fn decoupeur_strips_bidi_and_zero_width_characters() {
         // U+202E devant `gpj.exe` ferait lire `exe.jpg` ; chacun des caractères de la liste disparaît, le reste est intact.
-        for &c in INVISIBLES {
+        for c in invisibles() {
             let mut d = Decoupeur::new(LIGNE_MAX);
             let brut = format!("gpj{c}.exe\n");
             let v = lignes(&mut d, &[brut.as_bytes()], true);

@@ -98,9 +98,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "baluchon-texte"
+version = "0.1.0"
+
+[[package]]
 name = "baluchon-winget"
 version = "0.1.0"
 dependencies = [
+ "baluchon-texte",
  "serde",
  "toml",
 ]

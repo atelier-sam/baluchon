@@ -1,0 +1,20 @@
+[package]
+name = "baluchon-texte"
+version = "0.1.0"
+edition = "2021"
+# Même plancher que le noyau qui la lie : une seule chaîne d'outils pour tout le produit.
+rust-version = "1.89"
+description = "Texte venu d'ailleurs, rendu sûr à afficher : la liste unique des caractères invisibles qui trompent la lecture, et l'assainissement d'une ligne"
+license = "MIT"
+# WHY false : comme le noyau, le produit se livre en binaires signés. Une crate publiée ne se
+# retire jamais, et la forme de cette liste n'a pas de tiers à servir.
+publish = false
+
+[lib]
+name = "baluchon_texte"
+path = "src/lib.rs"
+
+# AUCUNE dépendance, et cela se garde : cette crate est liée par des programmes de toutes tailles
+# (le noyau, le moteur winget, des programmes compilés pour le navigateur) ; une dépendance de plus
+# ici serait une dépendance de plus partout, pour une liste de plages de caractères.
+[dependencies]

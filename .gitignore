@@ -22,4 +22,5 @@ Thumbs.db
 # Noyau Rust (baluchon-core) : artefacts de compilation et sorties de build
 core/target/
 winget/target/
+texte/target/
 dist/
