@@ -7,6 +7,7 @@
 //! appelant implémente avec SON exécuteur (le noyau : `RealWinget`, borné par `run_bounded`).
 
 use crate::catalog::App;
+use std::collections::VecDeque;
 use std::time::Duration;
 
 /// Durée maximale d'un paquet. Un installateur qui attend une fenêtre cachée ne
@@ -167,6 +168,123 @@ pub struct RunOut {
 /// verdicts se testent sans Windows.
 pub trait Winget {
     fn run(&self, args: &[String], timeout: Duration) -> std::io::Result<RunOut>;
+
+    /// Variante EN CONTINU : chaque ligne de la sortie part vers `sortie` au fil de l'eau,
+    /// et l'exécuteur s'arrête si [`Sortie::annule`] répond vrai.
+    ///
+    /// Le défaut ne diffuse rien en direct : il exécute [`Winget::run`] (bloquant) puis REJOUE
+    /// le texte ligne à ligne, par le même [`Decoupeur`]. Tout exécuteur existant reste donc
+    /// valide sans changement ; seul celui qui sait lire un tuyau pendant que le processus
+    /// tourne (et le tuer sur annulation) redéfinit cette méthode.
+    fn run_flux(
+        &self,
+        args: &[String],
+        timeout: Duration,
+        sortie: &mut dyn Sortie,
+    ) -> std::io::Result<Fin> {
+        if sortie.annule() {
+            return Ok(Fin::Annulee);
+        }
+        let r = self.run(args, timeout)?;
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        d.pousse(r.text.as_bytes(), &mut |l| sortie.ligne(l));
+        d.fin(&mut |l| sortie.ligne(l));
+        Ok(match r.code {
+            Some(c) => Fin::Code(c),
+            None => Fin::Delai,
+        })
+    }
+}
+
+/// Longueur maximale, en octets, d'une ligne rendue à une [`Sortie`] : au-delà, la ligne est
+/// COUPÉE (jamais rendue en entier). Une sortie sans fin de ligne ne fait donc pas grossir la
+/// mémoire de l'appelant.
+pub const LIGNE_MAX: usize = 512;
+
+/// Comment un winget lancé en continu s'est terminé.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fin {
+    /// Le processus a rendu ce code de sortie : [`classify_exit`] le juge.
+    Code(i32),
+    /// Tué faute de fin dans le délai.
+    Delai,
+    /// Arrêté parce que [`Sortie::annule`] a répondu vrai.
+    Annulee,
+}
+
+/// Où arrivent les lignes d'un winget en cours d'exécution, et par où l'on peut l'arrêter.
+pub trait Sortie {
+    /// Une ligne complète de la sortie de winget : jamais vide, bornée à [`LIGNE_MAX`] octets,
+    /// sans caractère de commande. Les lignes de PROGRESSION (barres, pourcentage, tailles) sont
+    /// rendues aussi : c'est l'appelant qui les lit ; le détail d'un échec, lui, les écarte.
+    fn ligne(&mut self, l: &str);
+
+    /// L'appelant veut-il arrêter l'installation ? Interrogé entre deux lectures.
+    fn annule(&self) -> bool;
+}
+
+/// Découpe un flux d'octets en lignes, sur `\n` ET sur `\r` : winget redessine ses barres de
+/// progression par un simple retour chariot, sans jamais aller à la ligne.
+///
+/// - Une ligne vide n'est jamais rendue (donc `\r\n` ne donne rien de plus que `\n`).
+/// - Une ligne plus longue que la borne est COUPÉE : le surplus est jeté jusqu'au saut suivant,
+///   la mémoire reste bornée quoi que la sortie contienne.
+/// - Les octets s'accumulent AVANT d'être lus en UTF-8 : un caractère coupé entre deux lectures
+///   du tuyau est reconstitué ; les octets invalides sont remplacés, jamais une erreur.
+pub struct Decoupeur {
+    ligne: Vec<u8>,
+    borne: usize,
+    coupee: bool,
+}
+
+impl Decoupeur {
+    pub fn new(borne: usize) -> Decoupeur {
+        Decoupeur {
+            ligne: Vec::new(),
+            borne: borne.max(1),
+            coupee: false,
+        }
+    }
+
+    /// Reçoit un morceau du flux ; chaque ligne complète part vers `f`.
+    pub fn pousse(&mut self, octets: &[u8], f: &mut dyn FnMut(&str)) {
+        for &b in octets {
+            if b == b'\n' || b == b'\r' {
+                self.rend(f);
+            } else if self.ligne.len() < self.borne {
+                self.ligne.push(b);
+            } else {
+                self.coupee = true;
+            }
+        }
+    }
+
+    /// Fin du flux : rend la ligne en cours, s'il y en a une.
+    pub fn fin(&mut self, f: &mut dyn FnMut(&str)) {
+        self.rend(f);
+    }
+
+    fn rend(&mut self, f: &mut dyn FnMut(&str)) {
+        let coupee = std::mem::take(&mut self.coupee);
+        let octets = std::mem::take(&mut self.ligne);
+        let texte = String::from_utf8_lossy(&octets);
+        // Une coupe au milieu d'un caractère laisse un octet incomplet en queue : il ne doit
+        // pas ressortir en caractère de remplacement.
+        let texte: &str = if coupee {
+            texte.trim_end_matches('\u{FFFD}')
+        } else {
+            &texte
+        };
+        let propre: String = texte
+            .chars()
+            .map(|c| if c == '\t' { ' ' } else { c })
+            .filter(|c| !c.is_control())
+            .collect();
+        let propre = propre.trim();
+        if !propre.is_empty() {
+            f(propre);
+        }
+    }
 }
 
 /// Lignes de progression de winget (barres, spinner, tailles) : du bruit pour un détail.
@@ -226,25 +344,87 @@ pub fn summarize_output(text: &str) -> String {
 /// milieu d'un lot, sans que personne la voie, ferait croire à un blocage.
 pub fn install_one(w: &dyn Winget, app: &App, user_scope: bool) -> PackageResult {
     let args = install_args(&app.winget, user_scope);
-    let res = match w.run(&args, INSTALL_TIMEOUT) {
-        Ok(r) => r,
-        Err(e) => {
-            return PackageResult {
-                key: app.key.clone(),
-                status: Status::Failed,
-                detail: format!("winget n'a pas pu être lancé : {e}"),
-            }
-        }
+    let (fin, text) = match w.run(&args, INSTALL_TIMEOUT) {
+        Ok(RunOut {
+            code: Some(c),
+            text,
+        }) => (Ok(Fin::Code(c)), text),
+        Ok(RunOut { code: None, text }) => (Ok(Fin::Delai), text),
+        Err(e) => (Err(e), String::new()),
     };
-    let Some(code) = res.code else {
-        return PackageResult {
-            key: app.key.clone(),
-            status: Status::Failed,
-            detail: format!(
+    verdict(app, user_scope, fin, &text)
+}
+
+/// Installe UN paquet EN CONTINU : chaque ligne de la sortie de winget part vers `sortie`
+/// pendant qu'il tourne, et `sortie.annule()` l'arrête. Le verdict est CELUI de
+/// [`install_one`] (même [`classify_exit`], mêmes phrases) : un seul juge, que l'appelant
+/// affiche une progression ou non. Une installation arrêtée par `annule` rend
+/// `Status::Failed` avec une phrase qui le dit, jamais un nouveau statut (le contrat tabulé
+/// lu par le wizard reste `ok|deja|echec`).
+pub fn install_one_flux(
+    w: &dyn Winget,
+    app: &App,
+    user_scope: bool,
+    sortie: &mut dyn Sortie,
+) -> PackageResult {
+    let args = install_args(&app.winget, user_scope);
+    let mut relais = Relais {
+        sortie,
+        dernieres: VecDeque::new(),
+    };
+    let fin = w.run_flux(&args, INSTALL_TIMEOUT, &mut relais);
+    // Le détail d'un échec n'a besoin que de la fin de la sortie : les lignes utiles les plus
+    // récentes suffisent (`summarize_output` n'en garde que deux).
+    let text = Vec::from(relais.dernieres).join("\n");
+    verdict(app, user_scope, fin, &text)
+}
+
+/// Combien de lignes utiles (hors progression) `install_one_flux` garde pour le détail d'un échec.
+const LIGNES_DE_DETAIL: usize = 8;
+
+/// Passe les lignes à la [`Sortie`] de l'appelant et retient les dernières lignes utiles.
+struct Relais<'a> {
+    sortie: &'a mut dyn Sortie,
+    dernieres: VecDeque<String>,
+}
+
+impl Sortie for Relais<'_> {
+    fn ligne(&mut self, l: &str) {
+        self.sortie.ligne(l);
+        if !is_progress_noise(l) {
+            if self.dernieres.len() == LIGNES_DE_DETAIL {
+                self.dernieres.pop_front();
+            }
+            self.dernieres.push_back(l.to_string());
+        }
+    }
+
+    fn annule(&self) -> bool {
+        self.sortie.annule()
+    }
+}
+
+/// Le verdict, commun à `install_one` et `install_one_flux`.
+fn verdict(app: &App, user_scope: bool, fin: std::io::Result<Fin>, text: &str) -> PackageResult {
+    let failed = |detail: String| PackageResult {
+        key: app.key.clone(),
+        status: Status::Failed,
+        detail,
+    };
+    let code = match fin {
+        Ok(Fin::Code(c)) => c,
+        Ok(Fin::Delai) => {
+            return failed(format!(
                 "pas de fin au bout de {} minutes, abandonné",
                 INSTALL_TIMEOUT.as_secs() / 60
-            ),
-        };
+            ))
+        }
+        Ok(Fin::Annulee) => {
+            return failed(
+                "installation interrompue : vérifie dans les applications installées de Windows ce qui a pu rester".into(),
+            )
+        }
+        Err(e) => return failed(format!("winget n'a pas pu être lancé : {e}")),
     };
     let mut c = classify_exit(code);
     if user_scope && (code as u32) == 0x8A15_0010 {
@@ -252,7 +432,7 @@ pub fn install_one(w: &dyn Winget, app: &App, user_scope: bool) -> PackageResult
             "installation pour tous les utilisateurs uniquement : relance en acceptant l'élévation administrateur".into();
     }
     if c.status == Status::Failed {
-        let tail = summarize_output(&res.text);
+        let tail = summarize_output(text);
         if !tail.is_empty() {
             c.detail = format!("{} — {tail}", c.detail);
         }
@@ -442,5 +622,280 @@ mod tests {
         let e = install_one(&w, &a, false);
         assert_eq!(e.status, Status::Failed);
         assert!(e.detail.contains("introuvable"));
+    }
+
+    // ── Flux ligne à ligne ───────────────────────────────────────────────────────────────
+
+    fn lignes(d: &mut Decoupeur, morceaux: &[&[u8]], fin: bool) -> Vec<String> {
+        let mut v = Vec::new();
+        for m in morceaux {
+            d.pousse(m, &mut |l| v.push(l.to_string()));
+        }
+        if fin {
+            d.fin(&mut |l| v.push(l.to_string()));
+        }
+        v
+    }
+
+    #[test]
+    fn decoupeur_cuts_on_lf_cr_and_crlf_and_never_renders_an_empty_line() {
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        // winget redessine sa barre par `\r` seul ; Windows termine ses lignes par `\r\n`.
+        let v = lignes(
+            &mut d,
+            &[
+                b"Trouv\xc3\xa9\r\n",
+                b"  10%\r  20%\r  30%\n\n\r\n",
+                b"fini\n",
+            ],
+            true,
+        );
+        assert_eq!(v, ["Trouvé", "10%", "20%", "30%", "fini"]);
+    }
+
+    #[test]
+    fn decoupeur_rebuilds_a_character_split_between_two_reads() {
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        // « é » = C3 A9, coupé entre deux lectures du tuyau.
+        let v = lignes(&mut d, &[b"caf\xc3", b"\xa9 pr\xc3\xaat\n"], true);
+        assert_eq!(v, ["café prêt"]);
+    }
+
+    #[test]
+    fn decoupeur_flushes_the_last_line_without_a_separator_and_only_at_the_end() {
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        assert!(lignes(&mut d, &[b"sans fin de ligne"], false).is_empty());
+        let mut v = Vec::new();
+        d.fin(&mut |l| v.push(l.to_string()));
+        assert_eq!(v, ["sans fin de ligne"]);
+        // Une seconde fin ne rend rien : la ligne est déjà partie.
+        let mut encore = Vec::new();
+        d.fin(&mut |l| encore.push(l.to_string()));
+        assert!(encore.is_empty());
+    }
+
+    #[test]
+    fn decoupeur_bounds_a_giant_line_and_still_renders_the_next_one() {
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        let geante = vec![b'x'; 4 * 1024 * 1024];
+        let mut v = Vec::new();
+        for morceau in geante.chunks(16 * 1024) {
+            d.pousse(morceau, &mut |l| v.push(l.to_string()));
+            // La mémoire retenue ne dépasse jamais la borne, quelle que soit la sortie.
+            assert!(d.ligne.len() <= LIGNE_MAX);
+        }
+        d.pousse(b"\nensuite\n", &mut |l| v.push(l.to_string()));
+        assert_eq!(v.len(), 2, "{} lignes", v.len());
+        assert_eq!(v[0].len(), LIGNE_MAX);
+        assert_eq!(v[1], "ensuite");
+    }
+
+    #[test]
+    fn decoupeur_does_not_leave_a_replacement_character_after_cutting_a_multibyte_one() {
+        let mut d = Decoupeur::new(5);
+        // « abcdé » : le « é » (2 octets) commence à l'octet 4 et la borne le coupe en deux.
+        let v = lignes(&mut d, &[b"abcd\xc3\xa9 suite\n"], true);
+        assert_eq!(v, ["abcd"]);
+        assert!(!v[0].contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn decoupeur_strips_control_characters_and_turns_tabs_into_spaces() {
+        let mut d = Decoupeur::new(LIGNE_MAX);
+        let v = lignes(&mut d, &[b"a\tb\x1b[0m\x07c\n"], true);
+        // La séquence d'échappement perd son caractère de commande ; elle n'a plus d'effet.
+        assert_eq!(v, ["a b[0mc"]);
+        assert!(!v[0].contains('\t'));
+    }
+
+    /// Exécuteur qui diffuse VRAIMENT : une ligne à la fois, en regardant `annule` entre deux.
+    struct Direct {
+        lignes: Vec<String>,
+        fin: Fin,
+        emises: RefCell<usize>,
+    }
+    impl Direct {
+        fn new(lignes: &[&str], fin: Fin) -> Direct {
+            Direct {
+                lignes: lignes.iter().map(|l| l.to_string()).collect(),
+                fin,
+                emises: RefCell::new(0),
+            }
+        }
+    }
+    impl Winget for Direct {
+        fn run(&self, _a: &[String], _t: Duration) -> std::io::Result<RunOut> {
+            panic!("le chemin en continu ne doit pas passer par `run`");
+        }
+        fn run_flux(
+            &self,
+            _a: &[String],
+            _t: Duration,
+            sortie: &mut dyn Sortie,
+        ) -> std::io::Result<Fin> {
+            for l in &self.lignes {
+                if sortie.annule() {
+                    return Ok(Fin::Annulee);
+                }
+                sortie.ligne(l);
+                *self.emises.borrow_mut() += 1;
+            }
+            Ok(self.fin)
+        }
+    }
+
+    /// Sortie d'essai : garde les lignes, demande l'annulation après `annule_apres` lignes.
+    struct Garde {
+        vues: Vec<String>,
+        annule_apres: Option<usize>,
+    }
+    impl Garde {
+        fn new(annule_apres: Option<usize>) -> Garde {
+            Garde {
+                vues: Vec::new(),
+                annule_apres,
+            }
+        }
+    }
+    impl Sortie for Garde {
+        fn ligne(&mut self, l: &str) {
+            self.vues.push(l.to_string());
+        }
+        fn annule(&self) -> bool {
+            self.annule_apres.is_some_and(|n| self.vues.len() >= n)
+        }
+    }
+
+    #[test]
+    fn flux_gives_the_same_verdict_as_the_blocking_install_for_every_outcome() {
+        let a = app("chrome", "Google.Chrome");
+        // (code de sortie, texte) : succès, déjà installé, redémarrage, hash invalide, MSI fatal,
+        // code inconnu, et le cas « machine seulement » en mode utilisateur.
+        let cas: [(i32, &str); 8] = [
+            (0, "Successfully installed"),
+            (-1978335135, "déjà installé"),
+            (-1978334967, "redémarrage"),
+            (-1978335215, "hash mismatch"),
+            (
+                1603,
+                "Starting package install...\nInstaller failed with exit code: 1603",
+            ),
+            (-1978335231, ""),
+            (-1978335216, "No applicable installer found"),
+            (3010, "ok"),
+        ];
+        for user_scope in [false, true] {
+            for (code, texte) in cas {
+                let bloquant = Fake::new(vec![out(code, texte)]);
+                let attendu = install_one(&bloquant, &a, user_scope);
+                // Défaut du trait : `run` puis rejeu des lignes.
+                let rejoue = Fake::new(vec![out(code, texte)]);
+                let mut s = Garde::new(None);
+                assert_eq!(
+                    install_one_flux(&rejoue, &a, user_scope, &mut s),
+                    attendu,
+                    "code {code} portée utilisateur {user_scope}"
+                );
+                // Exécuteur qui diffuse vraiment les mêmes lignes : même verdict, phrase comprise.
+                let lignes: Vec<&str> = texte.lines().collect();
+                let direct = Direct::new(&lignes, Fin::Code(code));
+                let mut s2 = Garde::new(None);
+                let vu = install_one_flux(&direct, &a, user_scope, &mut s2);
+                assert_eq!(vu, attendu, "diffusé, code {code}");
+            }
+        }
+    }
+
+    #[test]
+    fn flux_default_replays_the_text_line_by_line_including_progress_lines() {
+        let w = Fake::new(vec![out(
+            0,
+            "Téléchargement\r  10%\r  55%\r\nInstallation\r\nTerminé",
+        )]);
+        let mut s = Garde::new(None);
+        let r = install_one_flux(&w, &app("vlc", "VideoLAN.VLC"), false, &mut s);
+        assert_eq!(r.status, Status::Ok);
+        // La progression est rendue à l'appelant (c'est lui qui la lit)…
+        assert_eq!(
+            s.vues,
+            ["Téléchargement", "10%", "55%", "Installation", "Terminé"]
+        );
+        // … et les arguments sont ceux de `install_one`, rien de plus.
+        assert_eq!(w.seen.borrow()[0], install_args("VideoLAN.VLC", false));
+    }
+
+    #[test]
+    fn flux_stops_and_says_so_when_the_sortie_asks_to_cancel() {
+        let w = Direct::new(&["un", "deux", "trois", "quatre"], Fin::Code(0));
+        let mut s = Garde::new(Some(2));
+        let r = install_one_flux(&w, &app("vlc", "VideoLAN.VLC"), false, &mut s);
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.detail.contains("interrompue"), "{}", r.detail);
+        // L'exécuteur a regardé `annule` entre deux lignes : il n'a rien émis après la demande.
+        assert_eq!(s.vues, ["un", "deux"]);
+        assert_eq!(*w.emises.borrow(), 2);
+    }
+
+    #[test]
+    fn flux_cancelled_before_the_start_never_launches_winget() {
+        let w = Fake::new(vec![]);
+        let mut s = Garde::new(Some(0));
+        let r = install_one_flux(&w, &app("vlc", "VideoLAN.VLC"), false, &mut s);
+        assert_eq!(r.status, Status::Failed);
+        assert!(r.detail.contains("interrompue"), "{}", r.detail);
+        assert!(
+            w.seen.borrow().is_empty(),
+            "winget ne devait pas être lancé"
+        );
+    }
+
+    #[test]
+    fn flux_timeout_and_spawn_errors_are_failures_not_panics() {
+        let a = app("vlc", "VideoLAN.VLC");
+        let t = install_one_flux(
+            &Direct::new(&["début"], Fin::Delai),
+            &a,
+            false,
+            &mut Garde::new(None),
+        );
+        assert_eq!(t.status, Status::Failed);
+        assert!(t.detail.contains("minutes"), "{}", t.detail);
+        let e = install_one_flux(
+            &Fake::new(vec![Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "introuvable",
+            ))]),
+            &a,
+            false,
+            &mut Garde::new(None),
+        );
+        assert_eq!(e.status, Status::Failed);
+        assert!(e.detail.contains("introuvable"), "{}", e.detail);
+    }
+
+    #[test]
+    fn flux_failure_detail_keeps_the_last_useful_lines_and_drops_progress() {
+        let mut texte = String::from("Trouvé VLC\nTéléchargement\n");
+        for p in 0..200 {
+            texte.push_str(&format!("  {p}%\r"));
+        }
+        texte.push_str("Démarrage de l'installation\nInstallateur en échec : 1603\n");
+        for _ in 0..50 {
+            texte.push_str("  100%\r- \r");
+        }
+        let w = Fake::new(vec![out(1603, &texte)]);
+        let r = install_one_flux(
+            &w,
+            &app("vlc", "VideoLAN.VLC"),
+            false,
+            &mut Garde::new(None),
+        );
+        assert_eq!(r.status, Status::Failed);
+        assert!(
+            r.detail
+                .ends_with("Démarrage de l'installation / Installateur en échec : 1603"),
+            "{}",
+            r.detail
+        );
     }
 }
