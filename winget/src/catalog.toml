@@ -269,6 +269,15 @@ default = false
 
 # ---- Packs --------------------------------------------------------------------------------------------
 
+# L'ORDRE DES PACKS EST CELUI DE L'AFFICHAGE (le wizard gum liste les packs dans l'ordre de ce fichier, une surcharge ajoutant les siens à la
+# suite). « Essentiels d'un PC neuf » ouvre la liste : c'est ce qu'on veut sur un PC neuf, et c'est la ligne que le curseur du wizard trouve
+# d'abord. Un essai (`essentiels_ouvre_la_liste_des_packs`) épingle cet ordre.
+# Dérivé du drapeau `default = true` : cocher ou décocher une entrée change ce pack sans qu'on y touche.
+[[pack]]
+key = "essentiels"
+label = "Essentiels d'un PC neuf"
+defaults = true
+
 [[pack]]
 key = "artcraft-bureautique"
 label = "ArtCraft bureautique"
@@ -294,9 +303,3 @@ apps = ["artcraft-cad", "artcraft-material", "artcraft-texture"]
 key = "artcraft-suite"
 label = "Toute la suite ArtCraft"
 category = "ArtCraft"
-
-# Dérivé du drapeau `default = true` : cocher ou décocher une entrée change ce pack sans qu'on y touche.
-[[pack]]
-key = "essentiels"
-label = "Essentiels d'un PC neuf"
-defaults = true

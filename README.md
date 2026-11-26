@@ -86,7 +86,8 @@ réinstalle, ou crée le marqueur toi-même (le message de refus donne la comman
   vérifié.
 - **Lancer le compte recommandé** (marge restante × forfait) ou un autre ; un compte
   déjà ouvert ailleurs n'est pas relancé.
-- **Outils** — Windows : logiciels à cocher (winget, silencieux), Microsoft Office au
+- **Outils** — Windows : logiciels à cocher (winget, silencieux), avec des packs pour
+  démarrer (« Essentiels d'un PC neuf », la suite ArtCraft…) qui pré-cochent la liste, Microsoft Office au
   choix (365, LTSC 2024/2021, Famille…) en français, sans clé (« non activé ») ; partager
   ce PC avec les sessions de ton Mac (temporaire). Partout : te connecter à tes sessions
   tmux sur un Mac que tu as configuré (tunnel Cloudflare + code e-mail, puis mot de passe du

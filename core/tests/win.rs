@@ -250,11 +250,118 @@ fn a_broken_pack_in_the_override_makes_the_wizard_fall_back_with_a_warning() {
     assert_eq!(out.lines().count(), 34);
 }
 
+/// Les lignes `clé<TAB>libellé<TAB>clé,clé,…` de `win catalog --format packs`, découpées en trois champs.
+fn pack_lines(out: &str) -> Vec<Vec<String>> {
+    out.lines()
+        .map(|l| {
+            let f: Vec<String> = l.split('\t').map(str::to_string).collect();
+            assert_eq!(f.len(), 3, "trois champs partout : {l}");
+            f
+        })
+        .collect()
+}
+
+#[test]
+fn catalog_packs_lists_the_six_packs_with_essentials_first() {
+    let sb = Sb::new();
+    let o = sb
+        .cmd(true)
+        .args(["win", "catalog", "--format", "packs"])
+        .output()
+        .unwrap();
+    let (out, err, code) = s(&o);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.is_empty(), "aucun avertissement attendu : {err}");
+    let packs = pack_lines(&out);
+    let keys: Vec<&str> = packs.iter().map(|p| p[0].as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "essentiels",
+            "artcraft-bureautique",
+            "artcraft-photo-dessin",
+            "artcraft-video-son",
+            "artcraft-3d",
+            "artcraft-suite"
+        ],
+        "{out}"
+    );
+    // Les applis d'un pack sont des lignes de la liste du wizard (`win catalog`) : il peut les retrouver et les pré-cocher ;
+    // « essentiels » est EXACTEMENT ce que la liste pré-cochait déjà (la colonne « coché »).
+    let o = sb.cmd(true).args(["win", "catalog"]).output().unwrap();
+    let (lines, _, _) = s(&o);
+    let list: Vec<Vec<&str>> = lines.lines().map(|l| l.split('\t').collect()).collect();
+    for p in &packs {
+        for k in p[2].split(',') {
+            assert!(list.iter().any(|l| l[0] == k), "« {k} » du pack {}", p[0]);
+        }
+        assert!(!p[1].contains(','), "libellé sans virgule : {}", p[1]);
+    }
+    let defaults: Vec<&str> = list.iter().filter(|l| l[2] == "1").map(|l| l[0]).collect();
+    assert_eq!(packs[0][2], defaults.join(","));
+    // CONTRÔLE POSITIF : la liste, elle, ne porte toujours AUCUN pack (34 lignes à plat, comme avant).
+    assert_eq!(list.len(), 34);
+    assert!(list.iter().all(|l| !keys.contains(&l[0])));
+}
+
+#[test]
+fn catalog_packs_follows_the_override_and_falls_back_with_the_same_warning_as_the_list() {
+    let sb = Sb::new();
+    std::fs::create_dir_all(sb.root().join("config")).unwrap();
+    // Un pack ajouté vient À LA SUITE, « essentiels » reste en tête ; décocher chrome change « essentiels » sans qu'on le recopie.
+    std::fs::write(
+        sb.root().join("config/catalog.toml"),
+        "[[app]]\nkey = \"chrome\"\ndefault = false\n\n\
+         [[pack]]\nkey = \"mon-pack\"\nlabel = \"Mon pack\"\napps = [\"vlc\", \"chrome\"]\n",
+    )
+    .unwrap();
+    let o = sb
+        .cmd(true)
+        .args(["win", "catalog", "--format", "packs"])
+        .output()
+        .unwrap();
+    let (out, err, code) = s(&o);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.is_empty(), "{err}");
+    let packs = pack_lines(&out);
+    assert_eq!(packs.len(), 7, "{out}");
+    assert_eq!(packs[0][0], "essentiels");
+    assert!(!packs[0][2].split(',').any(|k| k == "chrome"), "{out}");
+    assert_eq!(packs[6], ["mon-pack", "Mon pack", "vlc,chrome"]);
+
+    // Un pack fautif : la surcharge est ignorée EN ENTIER, avec le message habituel, et les packs rendus sont ceux de l'embarqué.
+    std::fs::write(
+        sb.root().join("config/catalog.toml"),
+        "[[app]]\nkey = \"vlc\"\nremove = true\n\n\
+         [[pack]]\nkey = \"mon-pack\"\nlabel = \"Mon pack\"\napps = [\"vlc\"]\n",
+    )
+    .unwrap();
+    let packs_out = sb
+        .cmd(true)
+        .args(["win", "catalog", "--format", "packs"])
+        .output()
+        .unwrap();
+    let (out, err, code) = s(&packs_out);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        err.contains("surcharge ignorée") && err.contains("mon-pack"),
+        "{err}"
+    );
+    let packs = pack_lines(&out);
+    assert_eq!(packs.len(), 6, "{out}");
+    assert!(packs.iter().all(|p| p[0] != "mon-pack"));
+    // Le même message que celui de la liste : les deux sorties jugent le même fichier de la même façon.
+    let list_out = sb.cmd(true).args(["win", "catalog"]).output().unwrap();
+    let (_, list_err, _) = s(&list_out);
+    assert_eq!(err, list_err);
+}
+
 #[test]
 fn every_win_command_is_refused_with_exit_2_off_windows() {
     let sb = Sb::new();
     for args in [
         vec!["win", "catalog"],
+        vec!["win", "catalog", "--format", "packs"],
         vec!["win", "install", "chrome"],
         vec!["win", "office", "--list"],
         vec!["win", "office", "--edition", "365-apps"],

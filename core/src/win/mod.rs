@@ -2,6 +2,9 @@
 //!
 //! Contrat de sortie (le wizard lit stdout ligne à ligne, jamais de JSON) :
 //! - `win catalog` : `clé<TAB>libellé<TAB>coché(0|1)` ;
+//! - `win catalog --format packs` : `clé<TAB>libellé<TAB>clé,clé,…` (les applis du pack), une ligne par pack, dans l'ordre
+//!   du catalogue. Additif : `win catalog` ne change pas, et un noyau d'avant refuse `--format packs` (code 2), ce que le wizard
+//!   lit comme « pas de packs » et retombe sur la liste seule ;
 //! - `win install` : `ok|deja|echec<TAB>clé<TAB>détail`, une ligne par paquet ;
 //! - `win office --list` : `clé<TAB>libellé` ;
 //! - `win office --edition` : `ok|echec<TAB>office<TAB>détail`.
@@ -37,6 +40,8 @@ pub enum WinCmd {
 pub enum CatalogFormat {
     Lines,
     Json,
+    /// Les packs : `clé<TAB>libellé<TAB>clé,clé,…` (les clés d'applis à pré-cocher), dans l'ordre du catalogue.
+    Packs,
 }
 
 #[derive(Args, Debug)]
@@ -137,14 +142,21 @@ pub fn run(env: &Env, root: &Root, cmd: WinCmd) -> Result<i32> {
 }
 
 fn load_catalog(root: &Root) -> Result<Vec<catalog::App>> {
-    catalog::load(&root.path(), &mut |m| eprintln!("baluchon-core : {m}"))
+    load_full_catalog(root).map(|c| c.apps)
+}
+
+/// Applis ET packs, par la fusion unique : les trois sorties de `win catalog` lisent le même fichier de la même façon
+/// (une surcharge ignorée l'est partout, avec le même message sur stderr).
+fn load_full_catalog(root: &Root) -> Result<catalog::Catalogue> {
+    catalog::load_catalogue(&root.path(), &mut |m| eprintln!("baluchon-core : {m}"))
 }
 
 fn cmd_catalog(root: &Root, a: &CatalogArgs) -> Result<i32> {
-    let apps = load_catalog(root)?;
+    let full = load_full_catalog(root)?;
     match a.format {
-        CatalogFormat::Lines => out(&catalog::render_lines(&apps))?,
-        CatalogFormat::Json => out(&format!("{}\n", catalog::render_json(&apps)?))?,
+        CatalogFormat::Lines => out(&catalog::render_lines(&full.apps))?,
+        CatalogFormat::Json => out(&format!("{}\n", catalog::render_json(&full.apps)?))?,
+        CatalogFormat::Packs => out(&catalog::render_packs(&full.packs))?,
     }
     Ok(0)
 }
@@ -369,6 +381,12 @@ mod tests {
             parse(&["catalog", "--format", "json"]),
             WinCmd::Catalog(CatalogArgs {
                 format: CatalogFormat::Json
+            })
+        ));
+        assert!(matches!(
+            parse(&["catalog", "--format", "packs"]),
+            WinCmd::Catalog(CatalogArgs {
+                format: CatalogFormat::Packs
             })
         ));
         match parse(&["install", "chrome", "vlc", "--no-elevate"]) {

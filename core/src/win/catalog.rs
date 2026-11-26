@@ -11,7 +11,8 @@
 
 use crate::error::{CcpError, Result};
 pub use baluchon_winget::catalog::{
-    clean_label, render_lines, valid_key, valid_winget_id, App, EMBEDDED,
+    clean_label, render_lines, render_packs, valid_key, valid_winget_id, App, Catalogue, Pack,
+    EMBEDDED,
 };
 use baluchon_winget::catalog::{merge_catalogue, parse_catalogue, Fichier};
 use baluchon_winget::Erreur;
@@ -45,12 +46,21 @@ pub fn embedded() -> Result<Vec<App>> {
 /// invalide n'empêche pas le wizard de proposer le catalogue de base : on la
 /// signale sur stderr et on l'ignore (`warn` reçoit le message).
 ///
-/// WHY les packs sont jugés ici alors que le wizard n'en sert aucun : la surcharge est UN fichier,
-/// qui s'applique ou ne s'applique pas. Un `[[pack]]` fautif (clé citée retirée, pack vide…) doit
-/// la faire ignorer en entier avec son message, exactement comme une appli fautive ; sinon le
-/// wizard afficherait un catalogue que la console, elle, aurait refusé, et deux vues d'un même
-/// fichier divergeraient. Seule la partie applis est rendue (`Vec<App>`, chemins d'avant).
+/// Seule la partie applis est rendue (`Vec<App>`, le chemin d'avant les packs) : c'est [`load_catalogue`],
+/// la fusion unique, vue par ses applis. Les packs sont jugés quand même (voir `load_catalogue`).
 pub fn load(root_dir: &Path, warn: &mut dyn FnMut(String)) -> Result<Vec<App>> {
+    load_catalogue(root_dir, warn).map(|c| c.apps)
+}
+
+/// Catalogue embarqué + surcharge de la racine, applis ET packs : LA fusion, et la seule.
+///
+/// WHY les packs sont jugés avec les applis : la surcharge est UN fichier, qui s'applique ou ne
+/// s'applique pas. Un `[[pack]]` fautif (clé citée retirée, pack vide…) doit la faire ignorer en
+/// entier avec son message, exactement comme une appli fautive ; sinon le wizard (qui sert
+/// maintenant les packs par `win catalog --format packs`, ET la liste par `win catalog`) afficherait
+/// une liste qu'un autre lecteur du même fichier aurait refusée, et deux vues d'un même fichier
+/// divergeraient. Une surcharge ignorée l'est pour les DEUX sorties, avec le même message.
+pub fn load_catalogue(root_dir: &Path, warn: &mut dyn FnMut(String)) -> Result<Catalogue> {
     let file = root_dir.join("config").join(OVERRIDE_FILE);
     let origin = file.display().to_string();
     let over = match std::fs::read_to_string(&file) {
@@ -73,10 +83,10 @@ pub fn load(root_dir: &Path, warn: &mut dyn FnMut(String)) -> Result<Vec<App>> {
     let base = parse_catalogue(EMBEDDED, "catalogue embarqué")?;
     // Si la fusion échoue À CAUSE de la surcharge, on retombe sur l'embarqué seul.
     match merge_catalogue(base, over, &origin) {
-        Ok(c) => Ok(c.apps),
+        Ok(c) => Ok(c),
         Err(m) => {
             warn(format!("{m} ; surcharge ignorée."));
-            embedded()
+            Ok(baluchon_winget::catalog::embedded_catalogue()?)
         }
     }
 }

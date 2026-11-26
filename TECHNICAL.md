@@ -211,10 +211,17 @@ les jetons Cloudflare Access (`remote forget-access`), puis supprime le dossier 
   `config/catalog.toml`) puis `win install <clés>` → `winget install --id … -e
   --silent`, élévation demandée en amont, « déjà installé » = succès.
   `config/catalog.toml` peut aussi porter des `[[pack]]` (`key`, `label` et une seule source :
-  `apps = [...]`, `category = "X"` ou `defaults = true`), fusionnés par clé comme les applis. Le
-  wizard n'en affiche aucun (`win catalog` ne rend que des applis) mais les juge : un pack fautif
-  (clé citée inconnue ou retirée, pack vide, deux sources…) fait ignorer toute la surcharge, avec
-  son message sur stderr.
+  `apps = [...]`, `category = "X"` ou `defaults = true`), fusionnés par clé comme les applis. Un
+  pack fautif (clé citée inconnue ou retirée, pack vide, deux sources…) fait ignorer toute la
+  surcharge, avec son message sur stderr, pour la liste ET pour les packs (une seule fusion).
+  `win catalog` ne rend toujours que des applis ; `win catalog --format packs` rend les packs,
+  `clé<TAB>libellé<TAB>clé,clé,…`, dans l'ordre du catalogue (celui de `catalog.toml` : « Essentiels
+  d'un PC neuf » en tête, les packs d'une surcharge à la suite). Additif : `CONTRACT` ne bouge pas, et
+  un noyau d'avant refuse `--format packs` (code 2), que le wizard lit comme « pas de packs ».
+  Le wizard (`Claude.command`, `logiciels_depart`) pose « Par où commencer ? » AVANT la liste : un
+  pack ne fait que PRÉ-COCHER ses logiciels dans la liste complète, qu'on ajuste avant d'installer
+  (Entrée sur « Essentiels » = les cases pré-cochées d'avant les packs ; « Tout le catalogue, à cocher
+  moi-même » ne pré-coche rien).
 - **Windows, Office** : `win office --edition <clé> --lang fr-fr --apps …` →
   Office Deployment Tool, XML généré (`ExcludeApp` pour les apps non cochées,
   `AUTOACTIVATE=0`), ≥ 5 Go vérifiés, staging effacé.
@@ -401,6 +408,10 @@ et `Claude.command`.
   bibliothèque et le vrai désinstalleur : succès, jeton Access non effaçable, Trousseau refusé ou
   verrouillé, noyau menteur, annulation, désinstalleur illisible ou remplacé pendant le menu, manifeste
   forgé, `config` lien, cache, lien symbolique, hôte noté, contrôles positifs),
+  `scripts/logiciels.test.sh <dossier-vide-absolu>` (« Installer des logiciels » : les vraies
+  fonctions du wizard extraites de `Claude.command`, faux `gum` et faux noyau : menu des packs dans
+  l'ordre, pré-cochage exact, décochage, « à la carte », Échap, noyau d'avant sans packs, contrôle
+  positif contre l'ancien assistant),
   `scripts/uninstall.test.sh` (refus de chemins, noyau et crochet jamais lancés sans empreinte
   authentifiée, `config` lien, Trousseau verrouillé AVANT toute suppression (`show-keychain-info` ≠ 0 ou
   lecture refusée : code 15, rien supprimé, relance après déverrouillage) ou refus de la SUPPRESSION

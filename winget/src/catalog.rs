@@ -4,7 +4,9 @@
 //!
 //! Le wizard passe la sortie `lines` telle quelle à `gum choose --no-limit`, donc :
 //! une ligne par logiciel, `clé<TAB>libellé<TAB>coché(0|1)`, jamais de virgule dans
-//! un libellé (gum sépare `--selected` par des virgules) ni de tabulation.
+//! un libellé (gum sépare `--selected` par des virgules) ni de tabulation. Les packs ont leur
+//! propre sortie ([`render_packs`], `clé<TAB>libellé<TAB>clé,clé,…`) : le wizard les propose AVANT la
+//! liste et se sert du pack pour PRÉ-COCHER ses logiciels, la liste elle-même ne change pas.
 //!
 //! Fusion PAR CLÉ, champ par champ : l'utilisateur peut décocher `chrome` d'une ligne
 //! (`default = false`) sans recopier l'entrée entière, retirer une entrée
@@ -496,6 +498,17 @@ pub fn render_lines(apps: &[App]) -> String {
     s
 }
 
+/// `clé<TAB>libellé<TAB>clé,clé,…`, une ligne par pack, DANS L'ORDRE du catalogue (c'est l'ordre d'affichage : voir `catalog.toml`).
+/// Le troisième champ liste les clés d'applis du pack, séparées par des virgules : une clé n'en contient jamais ([`valid_key`]), et le
+/// wizard le lit tel quel pour savoir quoi pré-cocher. Comme [`render_lines`], jamais de tabulation ni de virgule dans un libellé.
+pub fn render_packs(packs: &[Pack]) -> String {
+    let mut s = String::new();
+    for p in packs {
+        s.push_str(&format!("{}\t{}\t{}\n", p.key, p.label, p.apps.join(",")));
+    }
+    s
+}
+
 /// Résout des clés demandées ; les inconnues sont listées TOUTES d'un coup.
 pub fn resolve<'a>(apps: &'a [App], keys: &[String]) -> Result<Vec<&'a App>, Erreur> {
     let mut found = Vec::new();
@@ -893,6 +906,97 @@ mod tests {
         }
     }
 
+    /// Les clés des packs d'un texte TOML (le sien, sans surcharge), dans l'ordre où le catalogue les rend.
+    fn cles_des_packs(texte: &str) -> Vec<String> {
+        let base = parse_catalogue(texte, "essai").unwrap();
+        merge_catalogue(base, Fichier::default(), "essai")
+            .unwrap()
+            .packs
+            .into_iter()
+            .map(|p| p.key)
+            .collect()
+    }
+
+    #[test]
+    fn essentiels_ouvre_la_liste_des_packs() {
+        // L'ordre du fichier EST l'ordre d'affichage (wizard : le curseur tombe sur la première ligne).
+        let ordre = cles_des_packs(EMBEDDED);
+        assert_eq!(ordre.first().map(String::as_str), Some("essentiels"));
+        assert_eq!(ordre.len(), 6, "{ordre:?}");
+        // CONTRÔLE POSITIF : l'essai voit l'ordre d'AVANT (« essentiels » en dernier) pour ce qu'il est, il ne passe pas à vide.
+        let bloc = "[[pack]]\nkey = \"essentiels\"\nlabel = \"Essentiels d'un PC neuf\"\ndefaults = true\n";
+        assert!(
+            EMBEDDED.contains(bloc),
+            "le bloc d'« essentiels » a changé de forme : mettre l'essai à jour"
+        );
+        let ancien = format!("{}\n{bloc}", EMBEDDED.replacen(bloc, "", 1));
+        let ordre_ancien = cles_des_packs(&ancien);
+        assert_eq!(
+            ordre_ancien.last().map(String::as_str),
+            Some("essentiels"),
+            "{ordre_ancien:?}"
+        );
+        assert_ne!(ordre_ancien.first(), ordre.first());
+        // Une surcharge AJOUTE ses packs à la suite et change un libellé SANS déplacer le pack : « essentiels » reste en tête.
+        let c = fusion_complete(
+            "[[pack]]\nkey = \"mon-pack\"\nlabel = \"Mon pack\"\napps = [\"vlc\"]\n\n\
+             [[pack]]\nkey = \"essentiels\"\nlabel = \"Mes essentiels\"\n",
+        )
+        .unwrap();
+        let ordre: Vec<&str> = c.packs.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(ordre.first(), Some(&"essentiels"));
+        assert_eq!(ordre.last(), Some(&"mon-pack"));
+        assert_eq!(c.packs[0].label, "Mes essentiels");
+    }
+
+    #[test]
+    fn la_sortie_des_packs_suit_le_catalogue_et_nomme_les_applis_a_pre_cocher() {
+        let c = embedded_catalogue().unwrap();
+        let sortie = render_packs(&c.packs);
+        let lignes: Vec<Vec<&str>> = sortie.lines().map(|l| l.split('\t').collect()).collect();
+        assert_eq!(lignes.len(), 6, "{sortie}");
+        // Dans l'ordre du catalogue, trois champs partout, « essentiels » en tête.
+        let cles_sorties: Vec<&str> = lignes.iter().map(|l| l[0]).collect();
+        let cles_catalogue: Vec<&str> = c.packs.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(cles_sorties, cles_catalogue);
+        assert_eq!(cles_sorties[0], "essentiels");
+        for l in &lignes {
+            assert_eq!(l.len(), 3, "{l:?}");
+            assert!(
+                !l[1].is_empty() && !l[1].contains(','),
+                "libellé de gum : {l:?}"
+            );
+            let applis: Vec<&str> = l[2].split(',').collect();
+            assert!(
+                !applis.is_empty() && applis.iter().all(|k| valid_key(k)),
+                "{l:?}"
+            );
+            // Chaque clé nommée est une ligne de la liste du wizard : le wizard peut la retrouver et la pré-cocher.
+            for k in &applis {
+                assert!(
+                    c.apps.iter().any(|a| a.key == *k),
+                    "« {k} » absente du catalogue ({l:?})"
+                );
+            }
+        }
+        // « essentiels » nomme EXACTEMENT les entrées cochées par défaut, dans l'ordre de la liste (celles que le wizard pré-cochait déjà).
+        let cochees: Vec<&str> = c
+            .apps
+            .iter()
+            .filter(|a| a.default)
+            .map(|a| a.key.as_str())
+            .collect();
+        assert_eq!(lignes[0][2], cochees.join(","));
+        // Un pack explicite garde l'ordre écrit : ArtCraft 3D.
+        let trois_d = lignes.iter().find(|l| l[0] == "artcraft-3d").unwrap();
+        assert_eq!(
+            trois_d[2],
+            "artcraft-cad,artcraft-material,artcraft-texture"
+        );
+        // Aucun pack : aucune ligne (le wizard retombe alors sur la liste seule).
+        assert_eq!(render_packs(&[]), "");
+    }
+
     #[test]
     fn les_six_packs_du_catalogue_livre_se_resolvent() {
         let c = embedded_catalogue().unwrap();
@@ -900,12 +1004,12 @@ mod tests {
         assert_eq!(
             ordre,
             [
+                "essentiels",
                 "artcraft-bureautique",
                 "artcraft-photo-dessin",
                 "artcraft-video-son",
                 "artcraft-3d",
-                "artcraft-suite",
-                "essentiels"
+                "artcraft-suite"
             ]
         );
         assert_eq!(

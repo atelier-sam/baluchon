@@ -80,7 +80,8 @@ in the wizard, "Tout déconnecter" (disconnect everything).
   copied, a copy gets revoked). The signed-in email is checked.
 - **Launch the recommended account** (remaining headroom × plan) or another one; an
   account already open elsewhere is not launched again.
-- **Tools** — Windows: tick-box software (winget, silent), Microsoft Office of your choice
+- **Tools** — Windows: tick-box software (winget, silent) with starter packs ("Essentiels d'un PC
+  neuf", the ArtCraft suite…) that pre-tick the list, Microsoft Office of your choice
   (365, LTSC 2024/2021, Home…) in French, without a key ("not activated"); share this PC
   with your Mac's sessions (temporary). Everywhere: connect to the tmux sessions of a Mac
   you have configured (Cloudflare tunnel + e-mail code, then the Mac's password — nothing

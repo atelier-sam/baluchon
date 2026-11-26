@@ -259,14 +259,38 @@ menu_accounts() {
 }
 
 # ---------- outils ----------
+# Les packs, AVANT la liste : « Par où commencer ? ». Un pack ne fait que PRÉ-COCHER ses logiciels dans la liste complète, qui reste là
+# pour ajuster avant d'installer : on voit ce qu'on va avoir, on en retire ou on en ajoute. La première ligne est « Essentiels d'un PC neuf » :
+# Entrée seule redonne ce que la liste pré-cochait avant les packs. Le dernier choix, « à la carte », ne pré-coche rien.
+# $1 = sortie de `win catalog --format packs` (« clé<TAB>libellé<TAB>clé,clé,… »), $2 = celle de `win catalog` (« clé<TAB>libellé<TAB>coché »).
+# Rend sur stdout les LIBELLÉS à pré-cocher, séparés par des virgules (le format de `gum --selected`), ou RIEN pour « à la carte » ;
+# code 1 = annulé (Échap). Le noyau garantit des libellés sans virgule ni tabulation. Deux packs de même libellé et même nombre de logiciels
+# (une surcharge qui s'y prend mal) sont indiscernables à l'écran : le premier gagne.
+logiciels_depart() {
+  local packs="$1" cat="$2" a_la_carte="Tout le catalogue, à cocher moi-même" table menu pick keys
+  table="$(printf '%s\n' "$packs" | awk -F'\t' '{ n = split($3, a, ","); printf "%s (%d logiciel%s)\t%s\n", $2, n, (n > 1 ? "s" : ""), $3 }')"
+  menu="$(printf '%s\n' "$table" | cut -f1)"
+  pick="$(printf '%s\n%s\n' "$menu" "$a_la_carte" | gum choose --header "Par où commencer ?" --cursor.foreground "$ORANGE")" || return 1
+  [ "$pick" != "$a_la_carte" ] || return 0
+  keys="$(printf '%s\n' "$table" | awk -F'\t' -v pick="$pick" '$1 == pick { print $2; exit }')"
+  [ -n "$keys" ] || return 0
+  printf '%s\n' "$cat" | awk -F'\t' -v keys="$keys" 'BEGIN { n = split(keys, a, ","); for (i = 1; i <= n; i++) want[a[i]] = 1 } ($1 in want) { printf "%s%s", (c++ ? "," : ""), $2 }'
+}
+
 tool_windows_apps() {
   title "INSTALLER DES LOGICIELS (WINDOWS)"
-  local cat sel keys pre
+  local cat sel keys pre packs
   cat="$(ccp_core win catalog --format lines 2>/dev/null)" || { bad "Catalogue indisponible (noyau baluchon-core)."; pause_key; return; }
   note "Coche avec Espace, valide avec Entrée. Installation silencieuse par winget (sources officielles)."
   # Lignes « clé<TAB>libellé<TAB>coché(0|1) » : on affiche le libellé, on garde la clé.
   # gum --selected sépare par des virgules : le noyau garantit des libellés sans virgule.
-  pre="$(printf '%s\n' "$cat" | awk -F'\t' '$3=="1"{printf "%s%s", (n++ ? "," : ""), $2}')"
+  # Packs : un noyau d'AVANT refuse `--format packs` (code 2) : pas de packs, la liste seule, pré-cochée comme avant.
+  packs="$(ccp_core win catalog --format packs 2>/dev/null)" || packs=""
+  if [ -n "$packs" ]; then
+    pre="$(logiciels_depart "$packs" "$cat")" || return
+  else
+    pre="$(printf '%s\n' "$cat" | awk -F'\t' '$3=="1"{printf "%s%s", (n++ ? "," : ""), $2}')"
+  fi
   sel="$(printf '%s\n' "$cat" | cut -f2 | gum choose --no-limit --height 20 ${pre:+--selected "$pre"} --header "Logiciels à installer" --cursor.foreground "$ORANGE")" || return
   [ -n "$sel" ] || return
   keys="$(printf '%s\n' "$cat" | awk -F'\t' 'NR==FNR{want[$0]=1; next} ($2 in want){print $1}' <(printf '%s\n' "$sel") -)"
